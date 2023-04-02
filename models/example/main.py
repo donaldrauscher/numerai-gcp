@@ -1,49 +1,180 @@
-import click, os
+import os, gc, re, json
+from typing import List
+
+import click
+import pandas as pd
 from numerapi import NumerAPI
+from lightgbm import LGBMRegressor
+
+from utils import (
+    neutralize,
+    get_biggest_change_features,
+    validation_metrics,
+    ERA_COL,
+    DATA_TYPE_COL,
+    TARGET_COL,
+    EXAMPLE_PREDS_COL
+)
+
+MODEL_ID = 'example'
 
 
 @click.group()
+@click.option('--run-id', default=os.environ.get('BATCH_TASK_INDEX', 0))
 @click.option('--overwrite/--no-overwrite', default=False)
 @click.pass_context
-def cli(ctx, overwrite):
+def cli(ctx, run_id, overwrite):
     ctx.ensure_object(dict)
     ctx.obj['OVERWRITE'] = overwrite
+
+    # this is where we'll store model, params, and metrics
+    ctx.obj['MODEL_RUN_PATH'] = os.path.join('data', 'artifacts', MODEL_ID, str(run_id))
+    os.makedirs(ctx.obj['MODEL_RUN_PATH'], exist_ok=True)
+
+    with open('params.json', 'r') as f:
+        ctx.obj['PARAMS'] = json.load(f)[run_id]
+
+    # create paths to input datasets
+    dataset_version = ctx.obj['PARAMS']['dataset_params']['version']
+    os.makedirs(os.path.join('data', 'datasets', dataset_version), exist_ok=True)
+
+    napi = NumerAPI()
+    current_round = napi.get_current_round()
+    make_path = lambda x: os.path.join('data', 'datasets', dataset_version, x)
+    ctx.obj['DATASETS'] = {
+        'train': make_path('train.parquet'),
+        # todo: does this change round-to-round?
+        'validation': make_path('validation.parquet'),
+        'live': make_path(f'live_{current_round}.parquet'),
+        'validation_example_preds': make_path('validation_example_preds.parquet'),
+        'features': make_path('features.json')
+    }
 
 
 @cli.command()
 @click.option('--dataset')
 @click.pass_context
 def download(ctx, dataset):
-    napi = NumerAPI()
-    current_round = napi.get_current_round()
-    version = os.path.split(dataset)[0]
+    # return <version>/<dataset>.parquet from path
+    def get_api_dataset_from_path(path: str) -> str:
+        out = os.path.join(*path.split('/')[-2:])
+        return re.sub('_[0-9]+\.parquet$', '.parquet', out)
 
-    out = dataset
-    if dataset.endswith('live.parquet'):
-        out = f"{version}/live_{current_round}.parquet"
-    out = os.path.join('data', 'datasets', out)
-    os.makedirs(os.path.dirname(out), exist_ok=True)
+    out = ctx.obj['DATASETS'][dataset]
+    api_dataset = get_api_dataset_from_path(out)
 
     if os.path.exists(out) and not ctx.obj['OVERWRITE']:
-        print(f"{out} already exists!")
+        print(f"{api_dataset} already exists!")
     else:
-        print(f'Downloading {dataset}...')
+        print(f'Downloading {api_dataset}...')
         try:
             os.remove(out)
         except FileNotFoundError:
             pass
-        napi.download_dataset(dataset, out)
+        napi = NumerAPI()
+        napi.download_dataset(api_dataset, out)
 
 
 @cli.command()
-@click.option('--version')
 @click.pass_context
 def download_all(ctx):
-    download(f"{version}/train.parquet")
-    download(f"{version}/validation.parquet")
-    download(f"{version}/live.parquet")
-    download(f"{version}/validation_example_preds.parquet")
-    download(f"{version}/features.json")
+    for dataset in ct.obj['DATASETS'].keys():
+        ctx.invoke(download, dataset=dataset)
+
+
+def load_data(ctx: click.Context) -> (pd.DataFrame, pd.DataFrame, pd.DataFrame):
+    with open(ctx.obj['DATASETS']['features'], "r") as f:
+        feature_metadata = json.load(f)
+    try:
+        feature_set = ctx.obj['PARAMS']['dataset_params']['feature_set']
+        features = feature_metadata["feature_sets"][feature_set]
+        print(f"Using feature set: {feature_set}")
+    except KeyError:
+        features = list(feature_metadata["feature_stats"].keys())
+
+    print(f"Number of features: {len(features)}")
+    read_columns = features + [ERA_COL, DATA_TYPE_COL, TARGET_COL]
+
+    # note: sometimes when trying to read the downloaded data you get an error about invalid magic parquet bytes...
+    # if so, delete the file and rerun the napi.download_dataset to fix the corrupted file
+    training_data = pd.read_parquet(ctx.obj['DATASETS']['train'], columns=read_columns)
+    validation_data = pd.read_parquet(ctx.obj['DATASETS']['validation'], columns=read_columns)
+    live_data = pd.read_parquet(ctx.obj['DATASETS']['validation'], columns=read_columns)
+
+    validation_preds = pd.read_parquet(ctx.obj['DATASETS']['validation_example_preds'])
+    validation_data[EXAMPLE_PREDS_COL] = validation_preds["prediction"]
+
+    return (training_data, validation_data, live_data)
+
+
+def load_model(ctx: click.Context):
+    path = os.path.join(ctx.obj['MODEL_RUN_PATH'], 'model.pkl')
+    if os.path.exists(path) and not ctx.obj['OVERWRITE']:
+        print("Trained model already exists!")
+        model = pd.read_pickle(path)
+    else:
+        model = False
+    return model
+
+
+@cli.command()
+@click.pass_context
+def train(ctx):
+    # load data
+    training_data, validation_data, live_data = load_data(ctx)
+    features = list(training_data.filter(like='feature_').columns)
+
+    # pare down the number of eras to every 4th era
+    # every_4th_era = training_data[ERA_COL].unique()[::4]
+    # training_data = training_data[training_data[ERA_COL].isin(every_4th_era)]
+
+    # train model
+    model = load_model(ctx)
+    if not model:
+        print("Model not found, training new one...")
+        params = ctx.obj['PARAMS']['model_params']
+        model = LGBMRegressor(**params)
+        model.fit(training_data.filter(like='feature_', axis='columns'),
+                  training_data[TARGET_COL])
+
+    gc.collect()
+
+    # generate predictions on validation
+    model_expected_features = model.booster_.feature_name()
+    if set(model_expected_features) != set(features):
+        print("New features are available! Might want to retrain model...")
+    validation_data.loc[:, "pred"] = model.predict(
+        validation_data.loc[:, model_expected_features])
+
+    # neutralize our predictions to the riskiest features (biggested change in
+    #   corr vs. target between halves of training data)
+    all_feature_corrs = training_data.groupby(ERA_COL).apply(
+        lambda era: era[features].corrwith(era[TARGET_COL])
+    )
+    n_neutralize_features = ctx.obj['PARAMS']['neutralize_params']['n_features']
+    riskiest_features = get_biggest_change_features(all_feature_corrs, n_neutralize_features)
+
+    gc.collect()
+
+    validation_data["pred_neutralized"] = neutralize(
+        df=validation_data,
+        columns=["pred"],
+        neutralizers=riskiest_features,
+        proportion=1.0,
+        normalize=True,
+        era_col=ERA_COL
+    )
+
+    # calculate metrics
+    validation_stats = validation_metrics(validation_data, ["pred", "pred_neutralized"], example_col=EXAMPLE_PREDS_COL, target_col=TARGET_COL)
+    print(validation_stats[["mean", "sharpe"]].to_markdown())
+
+    # save model, params, and metrics
+    pd.to_pickle(model, os.path.join(ctx.obj['MODEL_RUN_PATH'], 'model.pkl'))
+    with open(os.path.join(ctx.obj['MODEL_RUN_PATH'], 'params.json'), 'w') as f:
+        json.dump(ctx.obj['PARAMS'], f, indent=4, separators=(',', ': '))
+    with open(os.path.join(ctx.obj['MODEL_RUN_PATH'], 'metrics.json'), 'w') as f:
+        f.write(validation_stats.to_json(orient='index', indent=4))
 
 
 if __name__ == '__main__':
