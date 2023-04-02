@@ -50,6 +50,11 @@ def cli(ctx, run_id, overwrite):
         'features': make_path('features.json')
     }
 
+    # this is where we'll save our submissions
+    submission_dir = os.path.join('data', 'submissions', MODEL_ID, str(run_id))
+    os.makedirs(submission_dir, exist_ok=True)
+    ctx.obj['SUBMISSION_PATH'] = os.path.join(submission_dir, f"live_predictions_{current_round}.csv")
+
 
 @cli.command()
 @click.option('--dataset')
@@ -82,7 +87,7 @@ def download_all(ctx):
         ctx.invoke(download, dataset=dataset)
 
 
-def load_data(ctx: click.Context) -> (pd.DataFrame, pd.DataFrame, pd.DataFrame):
+def get_read_columns(ctx: click.Context) -> List[str]:
     with open(ctx.obj['DATASETS']['features'], "r") as f:
         feature_metadata = json.load(f)
     try:
@@ -94,17 +99,26 @@ def load_data(ctx: click.Context) -> (pd.DataFrame, pd.DataFrame, pd.DataFrame):
 
     print(f"Number of features: {len(features)}")
     read_columns = features + [ERA_COL, DATA_TYPE_COL, TARGET_COL]
+    return read_columns
+
+
+def load_training_data(ctx: click.Context) -> (pd.DataFrame, pd.DataFrame):
+    read_columns = get_read_columns(ctx)
 
     # note: sometimes when trying to read the downloaded data you get an error about invalid magic parquet bytes...
     # if so, delete the file and rerun the napi.download_dataset to fix the corrupted file
     training_data = pd.read_parquet(ctx.obj['DATASETS']['train'], columns=read_columns)
     validation_data = pd.read_parquet(ctx.obj['DATASETS']['validation'], columns=read_columns)
-    live_data = pd.read_parquet(ctx.obj['DATASETS']['validation'], columns=read_columns)
 
     validation_preds = pd.read_parquet(ctx.obj['DATASETS']['validation_example_preds'])
     validation_data[EXAMPLE_PREDS_COL] = validation_preds["prediction"]
 
-    return (training_data, validation_data, live_data)
+    return (training_data, validation_data)
+
+
+def load_live_data(ctx: click.Context) -> pd.DataFrame:
+    read_columns = get_read_columns(ctx)
+    return pd.read_parquet(ctx.obj['DATASETS']['live'], columns=read_columns)
 
 
 def load_model(ctx: click.Context):
@@ -121,7 +135,7 @@ def load_model(ctx: click.Context):
 @click.pass_context
 def train(ctx):
     # load data
-    training_data, validation_data, live_data = load_data(ctx)
+    training_data, validation_data = load_training_data(ctx)
     features = list(training_data.filter(like='feature_').columns)
 
     # pare down the number of eras to every 4th era
@@ -141,8 +155,6 @@ def train(ctx):
 
     # generate predictions on validation
     model_expected_features = model.booster_.feature_name()
-    if set(model_expected_features) != set(features):
-        print("New features are available! Might want to retrain model...")
     validation_data.loc[:, "pred"] = model.predict(
         validation_data.loc[:, model_expected_features])
 
@@ -175,6 +187,48 @@ def train(ctx):
         json.dump(ctx.obj['PARAMS'], f, indent=4, separators=(',', ': '))
     with open(os.path.join(ctx.obj['MODEL_RUN_PATH'], 'metrics.json'), 'w') as f:
         f.write(validation_stats.to_json(orient='index', indent=4))
+    with open(os.path.join(ctx.obj['MODEL_RUN_PATH'], 'neutralization.json'), 'w') as f:
+        json.dump(riskiest_features, f, indent=4, separators=(',', ': '))
+
+
+@cli.command()
+@click.pass_context
+def inference(ctx):
+    # load data
+    live_data = load_live_data(ctx)
+    features = list(live_data.filter(like='feature_').columns)
+
+    # load model
+    model = load_model(ctx)
+    if not model:
+        print("Model not found!")
+        raise
+
+    # generate predictions
+    model_expected_features = model.booster_.feature_name()
+    if set(model_expected_features) != set(features):
+        print("Some of features used to train model are not available in data")
+        raise
+
+    live_data.loc[:, "pred"] = model.predict(
+        live_data.loc[:, model_expected_features])
+
+    # neutralize
+    with open(os.path.join(ctx.obj['MODEL_RUN_PATH'], 'neutralization.json'), 'r') as f:
+        neutralization_features = json.load(f)
+
+    live_data["pred_neutralized"] = neutralize(
+        df=live_data,
+        columns=["pred"],
+        neutralizers=neutralization_features,
+        proportion=1.0,
+        normalize=True,
+        era_col=ERA_COL
+    )
+
+    # export
+    live_data["prediction"] = live_data['pred_neutralized'].rank(pct=True)
+    live_data["prediction"].to_csv(ctx.obj['SUBMISSION_PATH'])
 
 
 if __name__ == '__main__':
