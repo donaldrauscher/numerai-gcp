@@ -15,5 +15,21 @@
       "strategy": "top_k_riskiest_features",
       "n_features": 50
     }
+  },
+  {
+    "dataset_params": {
+      "version": "v4"
+    },
+    "model_params": {
+      "n_estimators": 20000,
+      "learning_rate": 0.001,
+      "max_depth": 6,
+      "num_leaves": 64,
+      "colsample_bytree": 0.1
+    },
+    "neutralize_params": {
+      "strategy": "top_k_riskiest_features",
+      "n_features": 50
+    }
   }
 ]
