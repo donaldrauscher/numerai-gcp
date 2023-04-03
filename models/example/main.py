@@ -21,29 +21,37 @@ MODEL_ID = 'example'
 
 @click.group()
 @click.option('--run-id', default=os.environ.get('BATCH_TASK_INDEX', 0))
+@click.option('--data-dir', default="data")
+@click.option('--test/--no-test', default=False)
 @click.option('--overwrite/--no-overwrite', default=False)
 @click.pass_context
-def cli(ctx, run_id, overwrite):
+def cli(ctx, run_id, data_dir, test, overwrite):
     ctx.ensure_object(dict)
     ctx.obj['OVERWRITE'] = overwrite
 
+    if test:
+        run_id = "test"
+
     # this is where we'll store model, params, and metrics
-    ctx.obj['MODEL_RUN_PATH'] = os.path.join('data', 'artifacts', MODEL_ID, str(run_id))
+    ctx.obj['MODEL_RUN_PATH'] = os.path.join(data_dir, 'artifacts', MODEL_ID, str(run_id))
     os.makedirs(ctx.obj['MODEL_RUN_PATH'], exist_ok=True)
 
-    with open('params.json', 'r') as f:
-        ctx.obj['PARAMS'] = json.load(f)[run_id]
+    if test:
+        with open('params_test.json', 'r') as f:
+            ctx.obj['PARAMS'] = json.load(f)
+    else:
+        with open('params.json', 'r') as f:
+            ctx.obj['PARAMS'] = json.load(f)[int(run_id)]
 
     # create paths to input datasets
     dataset_version = ctx.obj['PARAMS']['dataset_params']['version']
-    os.makedirs(os.path.join('data', 'datasets', dataset_version), exist_ok=True)
+    os.makedirs(os.path.join(data_dir, 'datasets', dataset_version), exist_ok=True)
 
     napi = NumerAPI()
     current_round = napi.get_current_round()
-    make_path = lambda x: os.path.join('data', 'datasets', dataset_version, x)
+    make_path = lambda x: os.path.join(data_dir, 'datasets', dataset_version, x)
     ctx.obj['DATASETS'] = {
         'train': make_path('train.parquet'),
-        # todo: does this change round-to-round?
         'validation': make_path('validation.parquet'),
         'live': make_path(f'live_{current_round}.parquet'),
         'validation_example_preds': make_path('validation_example_preds.parquet'),
@@ -51,7 +59,7 @@ def cli(ctx, run_id, overwrite):
     }
 
     # this is where we'll save our submissions
-    submission_dir = os.path.join('data', 'submissions', MODEL_ID, str(run_id))
+    submission_dir = os.path.join(data_dir, 'submissions', MODEL_ID, str(run_id))
     os.makedirs(submission_dir, exist_ok=True)
     ctx.obj['SUBMISSION_PATH'] = os.path.join(submission_dir, f"live_predictions_{current_round}.csv")
 
@@ -83,7 +91,7 @@ def download(ctx, dataset):
 @cli.command()
 @click.pass_context
 def download_all(ctx):
-    for dataset in ct.obj['DATASETS'].keys():
+    for dataset in ctx.obj['DATASETS'].keys():
         ctx.invoke(download, dataset=dataset)
 
 

@@ -2,7 +2,7 @@
   {
     "dataset_params": {
       "version": "v4",
-      "feature_set": "small"
+      "feature_set": "medium"
     },
     "model_params": {
       "n_estimators": 2000,
@@ -13,7 +13,7 @@
     },
     "neutralize_params": {
       "strategy": "top_k_riskiest_features",
-      "n_features": 5
+      "n_features": 50
     }
   }
 ]
