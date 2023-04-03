@@ -181,19 +181,25 @@ def train(ctx):
     validation_stats = validation_metrics(validation_data, ["pred", "pred_neutralized"], example_col=EXAMPLE_PREDS_COL, target_col=TARGET_COL)
     print(validation_stats[["mean", "sharpe"]].to_markdown())
 
+    # final model config
+    model_config = {
+        "neutralize_features": riskiest_features
+    }
+
     # save model, params, and metrics
     pd.to_pickle(model, os.path.join(ctx.obj['MODEL_RUN_PATH'], 'model.pkl'))
     with open(os.path.join(ctx.obj['MODEL_RUN_PATH'], 'params.json'), 'w') as f:
         json.dump(ctx.obj['PARAMS'], f, indent=4, separators=(',', ': '))
     with open(os.path.join(ctx.obj['MODEL_RUN_PATH'], 'metrics.json'), 'w') as f:
         f.write(validation_stats.to_json(orient='index', indent=4))
-    with open(os.path.join(ctx.obj['MODEL_RUN_PATH'], 'neutralization.json'), 'w') as f:
-        json.dump(riskiest_features, f, indent=4, separators=(',', ': '))
+    with open(os.path.join(ctx.obj['MODEL_RUN_PATH'], 'config.json'), 'w') as f:
+        json.dump(model_config, f, indent=4, separators=(',', ': '))
 
 
 @cli.command()
+@click.option('--model-name', default=None)
 @click.pass_context
-def inference(ctx):
+def inference(ctx, model_name):
     # load data
     live_data = load_live_data(ctx)
     features = list(live_data.filter(like='feature_').columns)
@@ -203,6 +209,9 @@ def inference(ctx):
     if not model:
         print("Model not found!")
         raise
+
+    with open(os.path.join(ctx.obj['MODEL_RUN_PATH'], 'config.json'), 'r') as f:
+        model_config = json.load(f)
 
     # generate predictions
     model_expected_features = model.booster_.feature_name()
@@ -214,13 +223,10 @@ def inference(ctx):
         live_data.loc[:, model_expected_features])
 
     # neutralize
-    with open(os.path.join(ctx.obj['MODEL_RUN_PATH'], 'neutralization.json'), 'r') as f:
-        neutralization_features = json.load(f)
-
     live_data["pred_neutralized"] = neutralize(
         df=live_data,
         columns=["pred"],
-        neutralizers=neutralization_features,
+        neutralizers=model_config['neutralize_features'],
         proportion=1.0,
         normalize=True,
         era_col=ERA_COL
@@ -229,6 +235,12 @@ def inference(ctx):
     # export
     live_data["prediction"] = live_data['pred_neutralized'].rank(pct=True)
     live_data["prediction"].to_csv(ctx.obj['SUBMISSION_PATH'])
+
+    # upload predictions
+    if model_name is not None:
+        napi = NumerAPI()
+        model_id = napi.get_models()[model_name]
+        napi.upload_predictions(ctx.obj['SUBMISSION_PATH'], model_id=model_id)
 
 
 if __name__ == '__main__':
