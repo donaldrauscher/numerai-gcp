@@ -49,7 +49,11 @@ def cli(ctx, run_id, data_dir, test, overwrite):
     os.makedirs(os.path.join(data_dir, 'datasets', dataset_version), exist_ok=True)
 
     napi = NumerAPI()
-    current_round = napi.get_current_round()
+    try:
+        current_round = napi.get_current_round()
+    except ValueError:
+        # in case current round not open for submissions
+        current_round = 'na'
     make_path = lambda x: os.path.join(data_dir, 'datasets', dataset_version, x)
     ctx.obj['DATASETS'] = {
         'train': make_path('train.parquet'),
@@ -223,9 +227,9 @@ def train(ctx):
 
 
 @cli.command()
-@click.option('--model-name', default=None)
+@click.option('--numerai-model-name', default=None)
 @click.pass_context
-def inference(ctx, model_name):
+def inference(ctx, numerai_model_name):
     # load model
     print("Loading model")
     model = load_model(ctx)
@@ -238,6 +242,7 @@ def inference(ctx, model_name):
 
     # load data
     print("Loading live data")
+    ctx.invoke(download, dataset='live')
     live_data = load_live_data(ctx)
     features = list(live_data.filter(like='feature_').columns)
 
@@ -265,10 +270,10 @@ def inference(ctx, model_name):
     live_data["prediction"].to_csv(ctx.obj['SUBMISSION_PATH'])
 
     # upload predictions
-    if model_name is not None:
+    if numerai_model_name is not None:
         print("Uploading predictions to Numerai")
         napi = NumerAPI()
-        model_id = napi.get_models()[model_name]
+        model_id = napi.get_models()[numerai_model_name]
         napi.upload_predictions(ctx.obj['SUBMISSION_PATH'], model_id=model_id)
 
 

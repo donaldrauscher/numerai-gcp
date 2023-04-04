@@ -1,0 +1,4 @@
+pip-tools==6.5.1
+pandas==2.0.0
+google-cloud-batch==0.7.0
+click==8.1.3

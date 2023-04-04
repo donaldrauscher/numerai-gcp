@@ -2,6 +2,8 @@
 
 Building models for Numerai tournament using GCP
 
+### Structure
+
 Some notes:
   - Script for building a model is put in a Docker container with a click-based CLI that has, at minimum, `train` and `inference` commands
   - Each model will have different sets of parameters, each representing a run.  Each run will have its own saved model (.pkl) and metrics.
@@ -32,3 +34,29 @@ Note: for local testing, create a symbolic link to `data` folder using the follo
 ```
 ln -s ../../data data
 ```
+
+### Launching Jobs
+
+To launch a training job:
+```
+python launcher.py \
+  [--overwrite] \
+  --model-id [example] \
+  train
+```
+
+To launch an inference job:
+```
+python launcher.py \
+  [--overwrite] \
+  --model-id [example] \
+  inference \
+  --run-id [run_id]
+  --numerai-model-name [numerai_model_name]
+```
+
+Notes:
+- If don't specify `numerai_model_name`, it will save output to GCS but not upload to Numerai
+- Unless overwrite flag is included, will only train models that don't exist
+- TODO: add a command for pulling and aggregating metrics
+- TODO: add a command for creating a cronjob to kick off batch inference job

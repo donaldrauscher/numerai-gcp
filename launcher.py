@@ -28,20 +28,40 @@ def create_container_runnable(model_id: str, commands: List[str]) -> batch_v1.Ru
     return runnable
 
 
-def create_batch_job(ctx: click.Context, job_name: str, task_count: int) -> batch_v1.Job:
+def create_training_task(ctx: click.Context) -> batch_v1.TaskSpec:
     def add_overwrite(commands: List[str]):
         if ctx.obj['OVERWRITE']:
             commands = ['--overwrite'] + commands
         return commands
 
+    # download-for-training will only run for BATCH_TASK_INDEX=0
     runnable1 = create_container_runnable(ctx.obj['MODEL_ID'], add_overwrite(["download-for-training"]))
+
+    # this ensures that BATCH_TASK_INDEX>1 waits for BATCH_TASK_INDEX=0 to complete download
     runnable2 = batch_v1.Runnable()
     runnable2.barrier = batch_v1.Runnable.Barrier()
+
     runnable3 = create_container_runnable(ctx.obj['MODEL_ID'], add_overwrite(["train"]))
 
     task = batch_v1.TaskSpec()
     task.runnables = [runnable1, runnable2, runnable3]
+    return task
 
+
+def create_inference_task(ctx: click.Context, run_id: str, numerai_model_name: str) -> batch_v1.TaskSpec:
+    commands = ["--run-id", run_id, "inference"]
+    if ctx.obj['OVERWRITE']:
+        commands = ['--overwrite'] + commands
+    if numerai_model_name:
+        commands += ['--numerai-model-name', numerai_model_name]
+
+    runnable = create_container_runnable(ctx.obj['MODEL_ID'], commands)
+    task = batch_v1.TaskSpec()
+    task.runnables = [runnable]
+    return task
+
+
+def create_batch_job(job_name: str, task: batch_v1.TaskSpec, task_count: int) -> batch_v1.Job:
     resources = batch_v1.ComputeResource()
     resources.cpu_milli = 15000
     resources.memory_mib = 64000
@@ -102,8 +122,20 @@ def cli(ctx, model_id, overwrite):
 def train(ctx):
     with open(os.path.join('models', ctx.obj['MODEL_ID'], 'params.json'), 'r') as f:
         task_count = len(json.load(f))
-    job_name = f"numerai-{ctx.obj['MODEL_ID'].replace('_', '-')}-train-{datetime.datetime.now().strftime('%Y-%m-%dt%H-%M-%S')}"
-    job = create_batch_job(ctx, job_name, task_count=task_count)
+    job_name = f"numerai-{ctx.obj['MODEL_ID']}-train-{datetime.datetime.now().strftime('%Y-%m-%dt%H-%M-%S')}"
+    task = create_training_task(ctx)
+    job = create_batch_job(job_name, task, task_count)
+    print(job)
+
+
+@cli.command()
+@click.option('--run-id', type=str)
+@click.option('--numerai-model-name', default=None)
+@click.pass_context
+def inference(ctx, run_id, numerai_model_name):
+    job_name = f"numerai-{ctx.obj['MODEL_ID']}-{run_id}-inference-{datetime.datetime.now().strftime('%Y-%m-%dt%H-%M-%S')}"
+    task = create_inference_task(ctx, run_id, numerai_model_name)
+    job = create_batch_job(job_name, task, task_count=1)
     print(job)
 
 
