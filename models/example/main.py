@@ -27,6 +27,7 @@ MODEL_ID = 'example'
 @click.pass_context
 def cli(ctx, run_id, data_dir, test, overwrite):
     ctx.ensure_object(dict)
+    ctx.obj['RUN_ID'] = int(run_id)
     ctx.obj['OVERWRITE'] = overwrite
 
     if test:
@@ -95,6 +96,18 @@ def download_all(ctx):
         ctx.invoke(download, dataset=dataset)
 
 
+@cli.command()
+@click.pass_context
+def download_for_training(ctx):
+    if ctx.obj['RUN_ID'] != 0:
+        print("Skipping download because not first task")
+        return
+    for dataset in ctx.obj['DATASETS'].keys():
+        if dataset == 'live':
+            continue
+        ctx.invoke(download, dataset=dataset)
+
+
 def get_read_columns(ctx: click.Context) -> List[str]:
     with open(ctx.obj['DATASETS']['features'], "r") as f:
         feature_metadata = json.load(f)
@@ -132,7 +145,6 @@ def load_live_data(ctx: click.Context) -> pd.DataFrame:
 def load_model(ctx: click.Context):
     path = os.path.join(ctx.obj['MODEL_RUN_PATH'], 'model.pkl')
     if os.path.exists(path) and not ctx.obj['OVERWRITE']:
-        print("Trained model already exists!")
         model = pd.read_pickle(path)
     else:
         model = False
@@ -142,32 +154,35 @@ def load_model(ctx: click.Context):
 @cli.command()
 @click.pass_context
 def train(ctx):
+    # determine if model has already been trained
+    model = load_model(ctx)
+    if model:
+        print("Model has already been trained")
+        return
+
     # load data
+    print("Loading data")
     training_data, validation_data = load_training_data(ctx)
     features = list(training_data.filter(like='feature_').columns)
 
-    # pare down the number of eras to every 4th era
-    # every_4th_era = training_data[ERA_COL].unique()[::4]
-    # training_data = training_data[training_data[ERA_COL].isin(every_4th_era)]
-
     # train model
-    model = load_model(ctx)
-    if not model:
-        print("Model not found, training new one...")
-        params = ctx.obj['PARAMS']['model_params']
-        model = LGBMRegressor(**params)
-        model.fit(training_data.filter(like='feature_', axis='columns'),
-                  training_data[TARGET_COL])
+    print("Training model")
+    params = ctx.obj['PARAMS']['model_params']
+    model = LGBMRegressor(**params)
+    model.fit(training_data.filter(like='feature_', axis='columns'),
+              training_data[TARGET_COL])
 
     gc.collect()
 
     # generate predictions on validation
+    print("Generating predictions on validation data")
     model_expected_features = model.booster_.feature_name()
     validation_data.loc[:, "pred"] = model.predict(
         validation_data.loc[:, model_expected_features])
 
     # neutralize our predictions to the riskiest features (biggested change in
     #   corr vs. target between halves of training data)
+    print("Determing features to neutralize against")
     all_feature_corrs = training_data.groupby(ERA_COL).apply(
         lambda era: era[features].corrwith(era[TARGET_COL])
     )
@@ -176,6 +191,7 @@ def train(ctx):
 
     gc.collect()
 
+    print("Neutralizing predictions on validation data")
     validation_data["pred_neutralized"] = neutralize(
         df=validation_data,
         columns=["pred"],
@@ -186,6 +202,7 @@ def train(ctx):
     )
 
     # calculate metrics
+    print("Calculating metrics on validation data")
     validation_stats = validation_metrics(validation_data, ["pred", "pred_neutralized"], example_col=EXAMPLE_PREDS_COL, target_col=TARGET_COL)
     print(validation_stats[["mean", "sharpe"]].to_markdown())
 
@@ -195,6 +212,7 @@ def train(ctx):
     }
 
     # save model, params, and metrics
+    print("Saving model, final config, parameters, and metrics")
     pd.to_pickle(model, os.path.join(ctx.obj['MODEL_RUN_PATH'], 'model.pkl'))
     with open(os.path.join(ctx.obj['MODEL_RUN_PATH'], 'params.json'), 'w') as f:
         json.dump(ctx.obj['PARAMS'], f, indent=4, separators=(',', ': '))
@@ -208,29 +226,30 @@ def train(ctx):
 @click.option('--model-name', default=None)
 @click.pass_context
 def inference(ctx, model_name):
-    # load data
-    live_data = load_live_data(ctx)
-    features = list(live_data.filter(like='feature_').columns)
-
     # load model
+    print("Loading model")
     model = load_model(ctx)
     if not model:
-        print("Model not found!")
+        print("Trained model not found!")
         raise
 
     with open(os.path.join(ctx.obj['MODEL_RUN_PATH'], 'config.json'), 'r') as f:
         model_config = json.load(f)
 
-    # generate predictions
-    model_expected_features = model.booster_.feature_name()
-    if set(model_expected_features) != set(features):
-        print("Some of features used to train model are not available in data")
-        raise
+    # load data
+    print("Loading live data")
+    live_data = load_live_data(ctx)
+    features = list(live_data.filter(like='feature_').columns)
 
+    # generate predictions
+    print("Generating predictions")
+    model_expected_features = model.booster_.feature_name()
+    assert set(model_expected_features) == set(features)
     live_data.loc[:, "pred"] = model.predict(
         live_data.loc[:, model_expected_features])
 
     # neutralize
+    print("Neutralizing predictions")
     live_data["pred_neutralized"] = neutralize(
         df=live_data,
         columns=["pred"],
@@ -241,11 +260,13 @@ def inference(ctx, model_name):
     )
 
     # export
+    print("Exporting predictions")
     live_data["prediction"] = live_data['pred_neutralized'].rank(pct=True)
     live_data["prediction"].to_csv(ctx.obj['SUBMISSION_PATH'])
 
     # upload predictions
     if model_name is not None:
+        print("Uploading predictions to Numerai")
         napi = NumerAPI()
         model_id = napi.get_models()[model_name]
         napi.upload_predictions(ctx.obj['SUBMISSION_PATH'], model_id=model_id)
