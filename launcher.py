@@ -63,12 +63,12 @@ def create_inference_task(ctx: click.Context, run_id: str, numerai_model_name: s
 
 def create_batch_job(job_name: str, task: batch_v1.TaskSpec, task_count: int) -> batch_v1.Job:
     resources = batch_v1.ComputeResource()
-    resources.cpu_milli = 15000
-    resources.memory_mib = 64000
+    resources.cpu_milli = 30000
+    resources.memory_mib = 120000
     task.compute_resource = resources
 
     task.max_retry_count = 0
-    task.max_run_duration = "21600s"
+    task.max_run_duration = "43200s"
 
     gcs_bucket = batch_v1.GCS()
     gcs_bucket.remote_path = os.path.join(CLOUD_STORAGE_BUCKET, CLOUD_STORAGE_PATH) + '/'
@@ -85,8 +85,7 @@ def create_batch_job(job_name: str, task: batch_v1.TaskSpec, task_count: int) ->
     group.parallelism = task_count
 
     policy = batch_v1.AllocationPolicy.InstancePolicy()
-    policy.machine_type = "c2-standard-16"
-    policy.provisioning_model = batch_v1.AllocationPolicy.ProvisioningModel(3) # pre-emptible
+    policy.machine_type = "c2-standard-30"
 
     instances = batch_v1.AllocationPolicy.InstancePolicyOrTemplate()
     instances.policy = policy

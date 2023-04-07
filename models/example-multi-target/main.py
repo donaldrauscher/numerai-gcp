@@ -8,7 +8,6 @@ from lightgbm import LGBMRegressor
 
 from utils import (
     neutralize,
-    get_biggest_change_features,
     validation_metrics,
     ERA_COL,
     DATA_TYPE_COL,
@@ -16,7 +15,7 @@ from utils import (
     EXAMPLE_PREDS_COL
 )
 
-MODEL_ID = 'example'
+MODEL_ID = 'example-multi-target'
 
 
 @click.group()
@@ -57,9 +56,9 @@ def cli(ctx, run_id, data_dir, test, overwrite):
         current_round = 'na'
     make_path = lambda x: os.path.join(data_dir, 'datasets', dataset_version, x)
     ctx.obj['DATASETS'] = {
-        'train': make_path('train.parquet'),
-        'validation': make_path('validation.parquet'),
-        'live': make_path(f'live_{current_round}.parquet'),
+        'train': make_path('train_int8.parquet'),
+        'validation': make_path('validation_int8.parquet'),
+        'live': make_path(f'live_int8_{current_round}.parquet'),
         'validation_example_preds': make_path('validation_example_preds.parquet'),
         'features': make_path('features.json')
     }
@@ -124,7 +123,7 @@ def get_read_columns(ctx: click.Context) -> List[str]:
         features = list(feature_metadata["feature_stats"].keys())
 
     print(f"Number of features: {len(features)}")
-    read_columns = features + [ERA_COL, DATA_TYPE_COL, TARGET_COL]
+    read_columns = features + feature_metadata['targets'] + [ERA_COL, DATA_TYPE_COL]
     return read_columns
 
 
@@ -147,8 +146,8 @@ def load_live_data(ctx: click.Context) -> pd.DataFrame:
     return pd.read_parquet(ctx.obj['DATASETS']['live'], columns=read_columns)
 
 
-def load_model(ctx: click.Context):
-    path = os.path.join(ctx.obj['MODEL_RUN_PATH'], 'model.pkl')
+def load_model(ctx: click.Context, model_key: str):
+    path = os.path.join(ctx.obj['MODEL_RUN_PATH'], 'models', f'{model_key}.pkl')
     if os.path.exists(path) and not ctx.obj['OVERWRITE']:
         model = pd.read_pickle(path)
     else:
@@ -156,55 +155,90 @@ def load_model(ctx: click.Context):
     return model
 
 
+def train_model(ctx: click.Context, model_key: str, target_col: str, params: dict,
+                all_data: pd.DataFrame, training_index: pd.Index, validation_index: pd.Index = None) :
+    model = load_model(ctx, model_key)
+    if model:
+        print(f"{model_key} model has already been trained")
+    else:
+        print(f"Training {model_key} model")
+
+        target_train_index = all_data.loc[training_index, target_col].dropna().index
+        features = list(all_data.filter(like='feature_').columns)
+
+        model = LGBMRegressor(**params)
+        model.fit(
+            all_data.loc[target_train_index, features],
+            all_data.loc[target_train_index, target_col]
+        )
+
+        os.makedirs(os.path.join(ctx.obj['MODEL_RUN_PATH'], 'models'), exist_ok=True)
+        out = os.path.join(ctx.obj['MODEL_RUN_PATH'], 'models', f'{model_key}.pkl')
+        pd.to_pickle(model, out)
+
+    if validation_index is not None:
+        print(f"Adding predictions for {target_col} to validation data")
+        model_expected_features = model.booster_.feature_name()
+        all_data.loc[validation_index, f"{target_col}_pred"] = model.predict(
+            all_data.loc[validation_index, model_expected_features])
+
+    del model
+    gc.collect()
+
+
 @cli.command()
 @click.pass_context
 def train(ctx):
-    # determine if model has already been trained
-    model = load_model(ctx)
-    if model:
-        print("Model has already been trained")
-        return
-
     # load data
     print("Loading data")
     training_data, validation_data = load_training_data(ctx)
     features = list(training_data.filter(like='feature_').columns)
 
-    # train model
-    print("Training model")
-    params = ctx.obj['PARAMS']['model_params']
-    model = LGBMRegressor(**params)
-    model.fit(training_data.filter(like='feature_', axis='columns'),
-              training_data[TARGET_COL])
+    # get all the data to possibly use for training
+    all_data = pd.concat([training_data, validation_data])
 
-    gc.collect()
-
-    # generate predictions on validation
-    print("Generating predictions on validation data")
-    model_expected_features = model.booster_.feature_name()
-    validation_data.loc[:, "pred"] = model.predict(
-        validation_data.loc[:, model_expected_features])
-
-    # neutralize our predictions to the riskiest features (biggested change in
-    #   corr vs. target between halves of training data)
-    print("Determing features to neutralize against")
-    all_feature_corrs = training_data.groupby(ERA_COL).apply(
-        lambda era: era[features].corrwith(era[TARGET_COL])
-    )
-    n_neutralize_features = ctx.obj['PARAMS']['neutralize_params']['n_features']
-    riskiest_features = get_biggest_change_features(all_feature_corrs, n_neutralize_features)
+    training_index = training_data.index
+    validation_index = validation_data.index
+    all_index = all_data.index
 
     del training_data
+    del validation_data
     gc.collect()
 
+    # fill in NAs
+    print("Cleaning up NAs")
+    na_impute = all_data[features].median(skipna=True).to_dict()
+    all_data[features] = all_data[features].fillna(na_impute)
+    all_data[features] = all_data[features].astype("int8")
+
+    # train models
+    model_keys = {}
+    for t in ctx.obj['PARAMS']['ensemble_params']['targets']:
+        train_model(
+            ctx,
+            model_key=f'train_{t}',
+            target_col=t,
+            params=ctx.obj['PARAMS']['model_params'],
+            all_data=all_data,
+            training_index=training_index,
+            validation_index=validation_index
+        )
+        model_keys[f'train_{t}'] = f'{t}_pred'
+
+    # make an ensemble
+    print("Ensembling predictions from different targets")
+    all_data['equal_weight'] = all_data[list(model_keys.values())].mean(axis=1)
+
+    # neutralize
     print("Neutralizing predictions on validation data")
-    validation_data["pred_neutralized"] = neutralize(
-        df=validation_data,
-        columns=["pred"],
-        neutralizers=riskiest_features,
-        proportion=1.0,
+    all_data["half_neutral_equal_weight"] = neutralize(
+        df=all_data.loc[validation_index, :],
+        columns=[f"equal_weight"],
+        neutralizers=features,
+        proportion=ctx.obj['PARAMS']['neutralize_params']['proportion'],
         normalize=True,
-        era_col=ERA_COL
+        era_col=ERA_COL,
+        verbose=True,
     )
 
     gc.collect()
@@ -212,19 +246,21 @@ def train(ctx):
     # calculate metrics
     print("Calculating metrics on validation data")
     validation_stats = validation_metrics(
-        validation_data, ["pred", "pred_neutralized"], example_col=EXAMPLE_PREDS_COL,
-        target_col=TARGET_COL, fast_mode=ctx.obj['TEST']
+        all_data.loc[validation_index, :], ["equal_weight", "half_neutral_equal_weight"],
+        example_col=EXAMPLE_PREDS_COL, target_col=TARGET_COL, fast_mode=ctx.obj['TEST']
     )
     print(validation_stats[["mean", "sharpe"]].to_markdown())
 
+    gc.collect()
+
     # final model config
     model_config = {
-        "neutralize_features": riskiest_features
+        "model_keys": model_keys,
+        "na_impute": na_impute
     }
 
-    # save model, params, and metrics
-    print("Saving model, final config, parameters, and metrics")
-    pd.to_pickle(model, os.path.join(ctx.obj['MODEL_RUN_PATH'], 'model.pkl'))
+    # save params, metrics, and configuration
+    print("Saving final config, parameters, and metrics")
     with open(os.path.join(ctx.obj['MODEL_RUN_PATH'], 'params.json'), 'w') as f:
         json.dump(ctx.obj['PARAMS'], f, indent=4, separators=(',', ': '))
     with open(os.path.join(ctx.obj['MODEL_RUN_PATH'], 'metrics.json'), 'w') as f:
@@ -237,15 +273,14 @@ def train(ctx):
 @click.option('--numerai-model-name', default=None)
 @click.pass_context
 def inference(ctx, numerai_model_name):
-    # load model
-    print("Loading model")
-    model = load_model(ctx)
-    if not model:
-        print("Trained model not found!")
+    # load model config
+    print("Loading model config")
+    try:
+        with open(os.path.join(ctx.obj['MODEL_RUN_PATH'], 'config.json'), 'r') as f:
+            model_config = json.load(f)
+    except FileNotFoundError:
+        print("Trained model(s) not found!")
         raise
-
-    with open(os.path.join(ctx.obj['MODEL_RUN_PATH'], 'config.json'), 'r') as f:
-        model_config = json.load(f)
 
     # load data
     print("Loading live data")
@@ -253,27 +288,40 @@ def inference(ctx, numerai_model_name):
     live_data = load_live_data(ctx)
     features = list(live_data.filter(like='feature_').columns)
 
+    # fill in NAs
+    print("Cleaning up NAs")
+    live_data[features] = live_data[features].fillna(model_config['na_impute'])
+    live_data[features] = live_data[features].astype("int8")
+
     # generate predictions
     print("Generating predictions")
-    model_expected_features = model.booster_.feature_name()
-    assert set(model_expected_features) == set(features)
-    live_data.loc[:, "pred"] = model.predict(
-        live_data.loc[:, model_expected_features])
+    model_keys = model_config['model_keys']
+    for model_key, pred_col in model_config['model_keys'].items():
+        model = load_model(ctx, model_key)
+        model_expected_features = model.booster_.feature_name()
+        assert set(model_expected_features) == set(features)
+        live_data.loc[:, pred_col] = model.predict(
+            live_data.loc[:, model_expected_features])
+        gc.collect()
+
+    # make an ensemble
+    print("Ensembling predictions from different targets")
+    live_data['equal_weight'] = live_data[list(model_keys.values())].mean(axis=1)
 
     # neutralize
     print("Neutralizing predictions")
-    live_data["pred_neutralized"] = neutralize(
+    live_data["half_neutral_equal_weight"] = neutralize(
         df=live_data,
-        columns=["pred"],
-        neutralizers=model_config['neutralize_features'],
-        proportion=1.0,
+        columns=["equal_weight"],
+        neutralizers=features,
+        proportion=ctx.obj['PARAMS']['neutralize_params']['proportion'],
         normalize=True,
         era_col=ERA_COL
     )
 
     # export
     print("Exporting predictions")
-    live_data["prediction"] = live_data['pred_neutralized'].rank(pct=True)
+    live_data["prediction"] = live_data['half_neutral_equal_weight'].rank(pct=True)
     live_data["prediction"].to_csv(ctx.obj['SUBMISSION_PATH'])
 
     # upload predictions
