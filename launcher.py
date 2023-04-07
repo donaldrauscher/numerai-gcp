@@ -1,10 +1,10 @@
-import json, os, datetime, time
+import json, os, datetime, time, re
 from typing import List
 
 import click
 import pandas as pd
 
-from google.cloud import batch_v1
+from google.cloud import batch_v1, storage
 
 
 PROJECT_ID = "blog-180218"
@@ -14,6 +14,7 @@ CLOUD_STORAGE_PATH = "numerai"
 
 
 batch_client = batch_v1.BatchServiceClient()
+storage_client = storage.Client()
 
 
 def create_container_runnable(model_id: str, commands: List[str]) -> batch_v1.Runnable:
@@ -128,7 +129,7 @@ def train(ctx):
 
 
 @cli.command()
-@click.option('--run-id', type=str)
+@click.option('--run-id', type=str, required=True)
 @click.option('--numerai-model-name', default=None)
 @click.pass_context
 def inference(ctx, run_id, numerai_model_name):
@@ -136,6 +137,25 @@ def inference(ctx, run_id, numerai_model_name):
     task = create_inference_task(ctx, run_id, numerai_model_name)
     job = create_batch_job(job_name, task, task_count=1)
     print(job)
+
+
+@cli.command()
+@click.pass_context
+def get_metrics(ctx):
+    prefix = os.path.join(CLOUD_STORAGE_PATH, 'artifacts', ctx.obj['MODEL_ID'])
+    blobs = [b for b in storage_client.list_blobs(CLOUD_STORAGE_BUCKET, prefix=prefix) \
+             if os.path.basename(b.name) == 'metrics.json']
+
+    metrics = []
+    for b in blobs:
+        df = pd.read_json(b.download_as_text(), orient='index')
+        df.reset_index(inplace=True)
+        param_index = re.compile(r'([0-9]+)/metrics\.json$').search(b.name).group(1)
+        df.insert(0, 'param_index', int(param_index))
+        metrics.append(df)
+    metrics = pd.concat(metrics, axis=0)
+
+    print(metrics)
 
 
 if __name__ == '__main__':

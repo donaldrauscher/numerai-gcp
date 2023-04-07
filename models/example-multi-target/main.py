@@ -223,7 +223,17 @@ def train(ctx):
             training_index=training_index,
             validation_index=validation_index
         )
-        model_keys[f'train_{t}'] = f'{t}_pred'
+        train_model(
+            ctx,
+            model_key=f'all_data_{t}',
+            target_col=t,
+            params=ctx.obj['PARAMS']['model_params'],
+            all_data=all_data,
+            training_index=all_index,
+            validation_index=None
+        )
+        # use all_data version for inference
+        model_keys[f'all_data_{t}'] = f'{t}_pred'
 
     # make an ensemble
     print("Ensembling predictions from different targets")
