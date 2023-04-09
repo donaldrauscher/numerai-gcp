@@ -15,7 +15,7 @@ from utils import (
     EXAMPLE_PREDS_COL
 )
 
-MODEL_ID = 'example-multi-target'
+MODEL_ID = 't1000'
 
 
 @click.group()
