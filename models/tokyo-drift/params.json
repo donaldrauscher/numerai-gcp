@@ -1,0 +1,106 @@
+[
+  {
+    "dataset_params": {
+      "version": "v4.1",
+      "feature_set": "medium"
+    },
+    "model_params": {
+      "n_estimators": 2000,
+      "learning_rate": 0.01,
+      "max_depth": 5,
+      "num_leaves": 32,
+      "colsample_bytree": 0.1,
+      "boosting": "dart"
+    },
+    "training_params": {
+      "eras_per_training_block": 104
+    },
+    "ensemble_params": {
+      "strategy": "equal_weight",
+      "targets": [
+        "target_nomi_v4_20"
+      ]
+    },
+    "neutralize_params": {
+      "strategy": "all_features",
+      "proportion": 0.5
+    }
+  },
+  {
+    "dataset_params": {
+      "version": "v4.1"
+    },
+    "model_params": {
+      "n_estimators": 2000,
+      "learning_rate": 0.01,
+      "max_depth": 5,
+      "num_leaves": 32,
+      "colsample_bytree": 0.1,
+      "boosting": "dart"
+    },
+    "training_params": {
+      "eras_per_training_block": 104
+    },
+    "ensemble_params": {
+      "strategy": "equal_weight",
+      "targets": [
+        "target_nomi_v4_20"
+      ]
+    },
+    "neutralize_params": {
+      "strategy": "all_features",
+      "proportion": 0.5
+    }
+  },
+  {
+    "dataset_params": {
+      "version": "v4.1",
+      "feature_set": "medium"
+    },
+    "model_params": {
+      "n_estimators": 2000,
+      "learning_rate": 0.01,
+      "max_depth": 5,
+      "num_leaves": 32,
+      "colsample_bytree": 0.1
+    },
+    "training_params": {
+      "eras_per_training_block": 104
+    },
+    "ensemble_params": {
+      "strategy": "equal_weight",
+      "targets": [
+        "target_nomi_v4_20"
+      ]
+    },
+    "neutralize_params": {
+      "strategy": "all_features",
+      "proportion": 0.5
+    }
+  },
+  {
+    "dataset_params": {
+      "version": "v4.1"
+    },
+    "model_params": {
+      "n_estimators": 2000,
+      "learning_rate": 0.01,
+      "max_depth": 5,
+      "num_leaves": 32,
+      "colsample_bytree": 0.1
+    },
+    "training_params": {
+      "eras_per_training_block": 104
+    },
+    "ensemble_params": {
+      "strategy": "equal_weight",
+      "targets": [
+        "target_nomi_v4_20"
+      ]
+    },
+    "neutralize_params": {
+      "strategy": "all_features",
+      "proportion": 0.5
+    }
+  }
+]
