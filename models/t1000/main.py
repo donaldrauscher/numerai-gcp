@@ -155,6 +155,16 @@ def load_model(ctx: click.Context, model_key: str):
     return model
 
 
+def load_model_config(ctx: click.Context):
+    path = os.path.join(ctx.obj['MODEL_RUN_PATH'], 'config.json')
+    if os.path.exists(path) and not ctx.obj['OVERWRITE']:
+        with open(path, 'r') as f:
+            model_config = json.load(f)
+    else:
+        model_config = False
+    return model_config
+
+
 def train_model(ctx: click.Context, model_key: str, target_col: str, params: dict,
                 all_data: pd.DataFrame, training_index: pd.Index, validation_index: pd.Index = None) :
     model = load_model(ctx, model_key)
@@ -189,6 +199,12 @@ def train_model(ctx: click.Context, model_key: str, target_col: str, params: dic
 @cli.command()
 @click.pass_context
 def train(ctx):
+    # try loading model config to see if we've already trained
+    model_config = load_model_config(ctx)
+    if model_config:
+        print("Model has already been trained")
+        return
+
     # load data
     print("Loading data")
     training_data, validation_data = load_training_data(ctx)
