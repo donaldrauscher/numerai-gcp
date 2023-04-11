@@ -165,35 +165,26 @@ def load_model_config(ctx: click.Context):
     return model_config
 
 
-def train_model(ctx: click.Context, model_key: str, target_col: str, params: dict,
-                all_data: pd.DataFrame, training_index: pd.Index, validation_index: pd.Index = None) :
-    model = load_model(ctx, model_key)
-    if model:
-        print(f"{model_key} model has already been trained")
-    else:
-        print(f"Training {model_key} model")
+def train_model(target_col: str, params: dict,
+                all_data: pd.DataFrame, training_index: pd.Index, validation_index: pd.Index = None,
+                init_model: LGBMRegressor = None) -> LGBMRegressor:
 
-        target_train_index = all_data.loc[training_index, target_col].dropna().index
-        features = list(all_data.filter(like='feature_').columns)
+    target_train_index = all_data.loc[training_index, target_col].dropna().index
+    features = list(all_data.filter(like='feature_').columns)
 
-        model = LGBMRegressor(**params)
-        model.fit(
-            all_data.loc[target_train_index, features],
-            all_data.loc[target_train_index, target_col]
-        )
-
-        os.makedirs(os.path.join(ctx.obj['MODEL_RUN_PATH'], 'models'), exist_ok=True)
-        out = os.path.join(ctx.obj['MODEL_RUN_PATH'], 'models', f'{model_key}.pkl')
-        pd.to_pickle(model, out)
+    model = LGBMRegressor(**params)
+    model.fit(
+        all_data.loc[target_train_index, features],
+        all_data.loc[target_train_index, target_col],
+        init_model=init_model
+    )
 
     if validation_index is not None and len(validation_index) > 0:
-        print(f"Adding predictions for {target_col} to validation data")
         model_expected_features = model.booster_.feature_name()
         all_data.loc[validation_index, f"{target_col}_pred"] = model.predict(
             all_data.loc[validation_index, model_expected_features])
 
-    del model
-    gc.collect()
+    return model
 
 
 @cli.command()
@@ -240,7 +231,7 @@ def train(ctx):
             training_eras = eras[(i*eras_per_training_block):((i+1)*eras_per_training_block)]
         train_blocks.append(training_eras)
 
-    validation_blocks = [eras[eras.index(min(i)):] for i in train_blocks[1:]] + [[]]
+    validation_blocks = train_blocks[1:] + [[]]
 
     # for i, (t, v) in enumerate(zip(train_blocks, validation_blocks)):
     #     print(f"Training block #{i}")
@@ -250,29 +241,34 @@ def train(ctx):
     # train models
     model_keys = {}
     for t in ctx.obj['PARAMS']['ensemble_params']['targets']:
+        print(f"Training {t} model")
+        model = None
+
         for i, (train_eras, validation_eras) in enumerate(zip(train_blocks, validation_blocks)):
             training_index_i = all_data.loc[all_data.era.astype(int).isin(train_eras), ['era']].index
             validation_index_i = all_data.loc[all_data.era.astype(int).isin(validation_eras), ['era']].index
 
-            all_data[f'{t}_residuals_{i}'] = all_data[t] - \
-                all_data.filter(regex=f"{t}_residuals_[0-9]+_pred").sum(axis=1)
-
-            train_model(
-                ctx,
-                model_key=f'{t}_{i}',
-                target_col=f'{t}_residuals_{i}',
+            model = train_model(
+                target_col=t,
                 params=ctx.obj['PARAMS']['model_params'],
                 all_data=all_data,
                 training_index=training_index_i,
-                validation_index=validation_index_i
+                validation_index=validation_index_i,
+                init_model=model
             )
 
-            model_keys[f'{t}_{i}'] = f'{t}_residuals_{i}_pred'
+        model_keys[t] = f'{t}_pred'
+
+        os.makedirs(os.path.join(ctx.obj['MODEL_RUN_PATH'], 'models'), exist_ok=True)
+        out = os.path.join(ctx.obj['MODEL_RUN_PATH'], 'models', f'{t}.pkl')
+        pd.to_pickle(model, out)
+
+        del model
+        gc.collect()
 
     # make an ensemble
     print("Ensembling predictions from different targets")
-    n_targets = len(ctx.obj['PARAMS']['ensemble_params']['targets'])
-    all_data['equal_weight'] = all_data.filter(list(model_keys.values())).sum(axis=1)/n_targets
+    all_data['equal_weight'] = all_data[list(model_keys.values())].mean(axis=1)
 
     # neutralize
     print("Neutralizing predictions on validation data")
@@ -351,8 +347,7 @@ def inference(ctx, numerai_model_name):
 
     # make an ensemble
     print("Ensembling predictions from different targets")
-    n_targets = len(ctx.obj['PARAMS']['ensemble_params']['targets'])
-    live_data['equal_weight'] = live_data[list(model_keys.values())].sum(axis=1)/n_targets
+    live_data['equal_weight'] = live_data[list(model_keys.values())].mean(axis=1)
 
     # neutralize
     print("Neutralizing predictions")
