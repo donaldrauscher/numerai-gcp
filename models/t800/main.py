@@ -170,6 +170,13 @@ def train(ctx):
     training_data, validation_data = load_training_data(ctx)
     features = list(training_data.filter(like='feature_').columns)
 
+    # reduce the number of eras to every 4th era to speed things up
+    if ctx.obj['TEST']:
+        every_4th_era = training_data[ERA_COL].unique()[::4]
+        training_data = training_data[training_data[ERA_COL].isin(every_4th_era)]
+        every_4th_era = validation_data[ERA_COL].unique()[::4]
+        validation_data = validation_data[validation_data[ERA_COL].isin(every_4th_era)]
+
     # train model
     print("Training model")
     params = ctx.obj['PARAMS']['model_params']
