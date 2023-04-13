@@ -5,6 +5,7 @@ import click
 import pandas as pd
 from numerapi import NumerAPI
 from lightgbm import LGBMRegressor
+from sklearn.linear_model import Ridge
 
 from utils import (
     neutralize,
@@ -201,6 +202,13 @@ def train(ctx):
     training_data, validation_data = load_training_data(ctx)
     features = list(training_data.filter(like='feature_').columns)
 
+    # reduce the number of eras to every 4th era to speed things up
+    if ctx.obj['TEST']:
+        every_4th_era = training_data[ERA_COL].unique()[::4]
+        training_data = training_data[training_data[ERA_COL].isin(every_4th_era)]
+        every_4th_era = validation_data[ERA_COL].unique()[::4]
+        validation_data = validation_data[validation_data[ERA_COL].isin(every_4th_era)]
+
     # get all the data to possibly use for training
     all_data = pd.concat([training_data, validation_data])
 
@@ -238,13 +246,23 @@ def train(ctx):
     #     print(f"  Training eras: {t}")
     #     print(f"  Validation eras: {v}")
 
+    # get targets we're going to train on
+    ensemble_params = ctx.obj['PARAMS']['ensemble_params']
+    try:
+        targets = ensemble_params['targets']
+        del ensemble_params['targets']
+    except KeyError:
+        targets = list(all_data.filter(like='target_').columns)
+
     # train models
     model_keys = {}
-    for t in ctx.obj['PARAMS']['ensemble_params']['targets']:
+    for t in targets:
         print(f"Training {t} model")
         model = None
 
         for i, (train_eras, validation_eras) in enumerate(zip(train_blocks, validation_blocks)):
+            print(f"   Training trees through era {max(train_eras)}")
+
             training_index_i = all_data.loc[all_data.era.astype(int).isin(train_eras), ['era']].index
             validation_index_i = all_data.loc[all_data.era.astype(int).isin(validation_eras), ['era']].index
 
@@ -266,15 +284,32 @@ def train(ctx):
         del model
         gc.collect()
 
-    # make an ensemble
+    # train ensembler
     print("Ensembling predictions from different targets")
-    all_data['equal_weight'] = all_data[list(model_keys.values())].mean(axis=1)
+
+    targets_pred = [f'{t}_pred' for t in targets]
+    target_train_index = all_data.loc[validation_index, ['target_nomi_v4_20']].dropna().index
+
+    ensembler = Ridge(**ensemble_params)
+    ensembler.fit(
+        all_data.loc[target_train_index, targets_pred],
+        all_data.loc[target_train_index, ['target_nomi_v4_20']]
+    )
+
+    all_data.loc[validation_index, ['pred_ensemble']] = ensembler.predict(
+        all_data.loc[validation_index, targets_pred])
+
+    out = os.path.join(ctx.obj['MODEL_RUN_PATH'], 'models', 'ensembler.pkl')
+    pd.to_pickle(ensembler, out)
+
+    for t,w in zip(targets, ensembler.coef_.flatten()):
+        print(f"   {t} weight: {w}")
 
     # neutralize
     print("Neutralizing predictions on validation data")
-    all_data["half_neutral_equal_weight"] = neutralize(
+    all_data["pred_ensemble_neutral"] = neutralize(
         df=all_data.loc[validation_index, :],
-        columns=[f"equal_weight"],
+        columns=["pred_ensemble"],
         neutralizers=features,
         proportion=ctx.obj['PARAMS']['neutralize_params']['proportion'],
         normalize=True,
@@ -287,16 +322,18 @@ def train(ctx):
     # calculate metrics
     print("Calculating metrics on validation data")
     validation_stats = validation_metrics(
-        all_data.loc[validation_index, :], ["equal_weight", "half_neutral_equal_weight"],
+        all_data.loc[validation_index, :], ["pred_ensemble", "pred_ensemble_neutral"],
         example_col=EXAMPLE_PREDS_COL, target_col=TARGET_COL, fast_mode=ctx.obj['TEST']
     )
-    print(validation_stats[["mean", "sharpe"]].to_markdown())
+    print(validation_stats[["mean", "sharpe", "corr_with_example_preds"]].to_markdown())
 
     gc.collect()
 
     # final model config
     model_config = {
         "model_keys": model_keys,
+        "ensemble_model_key": "ensembler",
+        "targets": targets,
         "na_impute": na_impute
     }
 
@@ -347,13 +384,19 @@ def inference(ctx, numerai_model_name):
 
     # make an ensemble
     print("Ensembling predictions from different targets")
-    live_data['equal_weight'] = live_data[list(model_keys.values())].mean(axis=1)
+
+    targets = model_config['targets']
+    targets_pred = [f"{t}_pred" for t in targets]
+
+    ensembler_model = load_model(ctx, model_config['ensemble_model_key'])
+    live_data.loc[:, ['pred_ensemble']] = ensembler_model.predict(
+        live_data.loc[:, targets_pred])
 
     # neutralize
     print("Neutralizing predictions")
-    live_data["half_neutral_equal_weight"] = neutralize(
+    live_data["pred_ensemble_neutral"] = neutralize(
         df=live_data,
-        columns=["equal_weight"],
+        columns=["pred_ensemble"],
         neutralizers=features,
         proportion=ctx.obj['PARAMS']['neutralize_params']['proportion'],
         normalize=True,
@@ -362,7 +405,7 @@ def inference(ctx, numerai_model_name):
 
     # export
     print("Exporting predictions")
-    live_data["prediction"] = live_data['half_neutral_equal_weight'].rank(pct=True)
+    live_data["prediction"] = live_data['pred_ensemble_neutral'].rank(pct=True)
     live_data["prediction"].to_csv(ctx.obj['SUBMISSION_PATH'])
 
     # upload predictions
