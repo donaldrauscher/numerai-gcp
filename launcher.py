@@ -1,10 +1,12 @@
 import json, os, datetime, time, re
 from typing import List
+from textwrap import dedent
 
 import click
 import pandas as pd
+from jinja2 import Template
 
-from google.cloud import batch_v1, storage
+from google.cloud import batch_v1, storage, workflows
 
 
 PROJECT_ID = "blog-180218"
@@ -15,6 +17,7 @@ CLOUD_STORAGE_PATH = "numerai"
 
 batch_client = batch_v1.BatchServiceClient()
 storage_client = storage.Client()
+workflows_client = workflows.WorkflowsClient()
 
 
 def create_container_runnable(model_id: str, commands: List[str]) -> batch_v1.Runnable:
@@ -156,6 +159,129 @@ def get_metrics(ctx):
     metrics = pd.concat(metrics, axis=0)
 
     print(metrics)
+
+
+@cli.command()
+@click.option('--run-id', type=str, required=True)
+@click.option('--numerai-model-name', required=True)
+@click.pass_context
+def create_workflow(ctx, run_id, numerai_model_name):
+    workflow_contents = Template(dedent("""\
+    main:
+      params: [args]
+      steps:
+        - init:
+            assign:
+              - projectId: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+              - region: "us-central1"
+              - batchApi: "batch.googleapis.com/v1"
+              - batchApiUrl: ${"https://" + batchApi + "/projects/" + projectId + "/locations/" + region + "/jobs"}
+              - modelId: "{{ model_id }}"
+              - runId: "{{ run_id }}"
+              - imageUri: ${"gcr.io/" + projectId + "/numerai:" + modelId}
+              - jobId: ${"numerai-" + modelId + "-" + runId + "-inference-" + string(int(sys.now()))}
+              - numeraiSecretKey: "{{ secret_key }}"
+              - numeraiPublicId: "{{ public_id }}"
+              - numeraiModelName: "{{ numerai_model_name }}"
+        - createAndRunBatchJob:
+            call: http.post
+            args:
+              url: ${batchApiUrl}
+              query:
+                job_id: ${jobId}
+              headers:
+                Content-Type: application/json
+              auth:
+                type: OAuth2
+              body:
+                taskGroups:
+                  taskSpec:
+                    runnables:
+                      - container:
+                          imageUri: ${imageUri}
+                          commands:
+                            - "--data-dir"
+                            - "/mnt/disks/share"
+                            - "--run-id"
+                            - ${runId}
+                            - "inference"
+                            - "--numerai-model-name"
+                            - ${numeraiModelName}
+                          volumes: "/mnt/disks/share:/mnt/disks/share:rw"
+                        environment:
+                          variables:
+                            NUMERAI_SECRET_KEY: ${numeraiSecretKey}
+                            NUMERAI_PUBLIC_ID: ${numeraiPublicId}
+                    computeResource:
+                      cpuMilli: 30000
+                      memoryMib: 120000
+                    maxRunDuration:
+                      seconds: 43200
+                    volumes:
+                      gcs:
+                        remotePath: "djr-data/numerai/"
+                      mountPath: "/mnt/disks/share"
+                  taskCount: 1
+                  taskCountPerNode: 1
+                  parallelism: 1
+                allocationPolicy:
+                  instances:
+                    policy:
+                      machineType: "c2-standard-30"
+                logsPolicy:
+                  destination: CLOUD_LOGGING
+            result: createAndRunBatchJobResponse
+        - getJob:
+            call: http.get
+            args:
+              url: ${batchApiUrl + "/" + jobId}
+              auth:
+                type: OAuth2
+            result: getJobResult
+        - logState:
+            call: sys.log
+            args:
+              data: ${"Current job state " + getJobResult.body.status.state}
+        - checkState:
+            switch:
+              - condition: ${getJobResult.body.status.state == "SUCCEEDED"}
+                next: returnResult
+              - condition: ${getJobResult.body.status.state == "FAILED"}
+                next: failExecution
+            next: sleep
+        - sleep:
+            call: sys.sleep
+            args:
+              seconds: 10
+            next: getJob
+        - returnResult:
+            return:
+              jobId: ${jobId}
+        - failExecution:
+            raise:
+              message: ${"The underlying batch job " + jobId + " failed"}
+    """))
+    workflow_contents = workflow_contents.render(
+        model_id=ctx.obj['MODEL_ID'],
+        run_id=run_id,
+        public_id=os.environ['NUMERAI_PUBLIC_ID'],
+        secret_key=os.environ['NUMERAI_SECRET_KEY'],
+        numerai_model_name=numerai_model_name
+    )
+
+    workflow = workflows.Workflow()
+    workflow.name = f"numerai-submit-{numerai_model_name}"
+    workflow.description = "Workflow which downloads live round, generates predictions, and submits to Numerai"
+    workflow.source_contents = workflow_contents
+
+    create_request = workflows.CreateWorkflowRequest()
+    create_request.parent = f"projects/{PROJECT_ID}/locations/{REGION}"
+    create_request.workflow = workflow
+    create_request.workflow_id = f"numerai-submit-{numerai_model_name}"
+
+    operation = workflows_client.create_workflow(request=create_request)
+    response = operation.result()
+    print(response)
 
 
 if __name__ == '__main__':
