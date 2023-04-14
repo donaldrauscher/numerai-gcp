@@ -62,7 +62,15 @@ python launcher.py \
   get-metrics
 ```
 
+To create a cronjob + workflow:
+```
+python launcher.py \
+  --model-id [example] \
+  create-workflow \
+  --run-id [run_id] \
+  --numerai-model-name [numerai_model_name]
+```
+
 Notes:
 - If don't specify `numerai_model_name`, it will save output to GCS but not upload to Numerai
 - Unless overwrite flag is included, will only train models that don't exist
-- TODO: add a command for creating a cronjob + workflow for kicking off batch inference job

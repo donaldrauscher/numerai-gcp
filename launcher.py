@@ -6,18 +6,20 @@ import click, docker
 import pandas as pd
 from jinja2 import Template
 
-from google.cloud import batch_v1, storage, workflows
+from google.cloud import batch_v1, storage, workflows, scheduler_v1
 
 
 PROJECT_ID = "blog-180218"
 REGION = "us-central1"
 CLOUD_STORAGE_BUCKET = "djr-data"
 CLOUD_STORAGE_PATH = "numerai"
+COMPUTE_SERVICE_ACCOUNT = "89590359009-compute@developer.gserviceaccount.com"
 
 
 batch_client = batch_v1.BatchServiceClient()
 storage_client = storage.Client()
 workflows_client = workflows.WorkflowsClient()
+scheduler_client = scheduler_v1.CloudSchedulerClient()
 docker_client = docker.from_env()
 
 
@@ -115,7 +117,7 @@ def build_and_push_image(model_id: str):
     print("Building image")
     _, build_logs = docker_client.images.build(
         path=os.path.join('models', model_id),
-        tag=f"gcr.io/blog-180218/numerai:{model_id}"
+        tag=f"gcr.io/{PROJECT_ID}/numerai:{model_id}"
     )
     for l in build_logs:
         if 'stream' in l.keys():
@@ -123,7 +125,7 @@ def build_and_push_image(model_id: str):
 
     print("Pushing image")
     push_logs = docker_client.images.push(
-        repository="gcr.io/blog-180218/numerai",
+        repository=f"gcr.io/{PROJECT_ID}/numerai",
         tag=model_id,
         stream=True,
         decode=True
@@ -134,6 +136,10 @@ def build_and_push_image(model_id: str):
 
     print("Pruning dangling images")
     docker_client.images.prune(filters={'dangling': True})
+
+
+def get_workflow_id(numerai_model_name: str) -> str:
+    return f"numerai-submit-{numerai_model_name.replace('_', '-')}"
 
 
 @click.group()
@@ -195,6 +201,10 @@ def get_metrics(ctx):
 @click.option('--numerai-model-name', required=True)
 @click.pass_context
 def create_workflow(ctx, run_id, numerai_model_name):
+    workflow_id = get_workflow_id(numerai_model_name)
+
+    print("Creating workflow")
+
     workflow_contents = Template(dedent("""\
     main:
       params: [args]
@@ -202,7 +212,7 @@ def create_workflow(ctx, run_id, numerai_model_name):
         - init:
             assign:
               - projectId: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
-              - region: "us-central1"
+              - region: "{{ region }}"
               - batchApi: "batch.googleapis.com/v1"
               - batchApiUrl: ${"https://" + batchApi + "/projects/" + projectId + "/locations/" + region + "/jobs"}
               - modelId: "{{ model_id }}"
@@ -248,7 +258,7 @@ def create_workflow(ctx, run_id, numerai_model_name):
                       seconds: 43200
                     volumes:
                       gcs:
-                        remotePath: "djr-data/numerai/"
+                        remotePath: "{{ gcs_path }}"
                       mountPath: "/mnt/disks/share"
                   taskCount: 1
                   taskCountPerNode: 1
@@ -295,7 +305,9 @@ def create_workflow(ctx, run_id, numerai_model_name):
         run_id=run_id,
         public_id=os.environ['NUMERAI_PUBLIC_ID'],
         secret_key=os.environ['NUMERAI_SECRET_KEY'],
-        numerai_model_name=numerai_model_name
+        numerai_model_name=numerai_model_name,
+        gcs_path=os.path.join(CLOUD_STORAGE_BUCKET, CLOUD_STORAGE_PATH) + '/',
+        region=REGION
     )
 
     workflow = workflows.Workflow()
@@ -306,11 +318,49 @@ def create_workflow(ctx, run_id, numerai_model_name):
     create_request = workflows.CreateWorkflowRequest()
     create_request.parent = f"projects/{PROJECT_ID}/locations/{REGION}"
     create_request.workflow = workflow
-    create_request.workflow_id = f"numerai-submit-{numerai_model_name}"
+    create_request.workflow_id = workflow_id
 
     operation = workflows_client.create_workflow(request=create_request)
     response = operation.result()
     print(response)
+
+    print("Create cronjob to trigger workflow")
+
+    target = scheduler_v1.HttpTarget()
+    target.uri = f"https://workflowexecutions.googleapis.com/v1/projects/{PROJECT_ID}/locations/{REGION}/workflows/{workflow_id}/executions"
+    target.http_method = 1 # post
+    target.oauth_token = scheduler_v1.OAuthToken(service_account_email=COMPUTE_SERVICE_ACCOUNT)
+
+    job = scheduler_v1.Job()
+    job.name = f"projects/{PROJECT_ID}/locations/{REGION}/jobs/{workflow_id}"
+    job.http_target = target
+    job.schedule = "30 13 * * 2-5,7"
+    job.time_zone = "Etc/UTC"
+
+    request = scheduler_v1.CreateJobRequest()
+    request.parent = f"projects/{PROJECT_ID}/locations/{REGION}"
+    request.job = job
+
+    response = scheduler_client.create_job(request)
+    print(response)
+
+
+@cli.command()
+@click.option('--numerai-model-name', required=True)
+@click.pass_context
+def delete_workflow(ctx, numerai_model_name):
+    workflow_id = get_workflow_id(numerai_model_name)
+
+    print("Deleting workflow")
+    delete_request = workflows.DeleteWorkflowRequest()
+    delete_request.name = f"projects/{PROJECT_ID}/locations/{REGION}/workflows/{workflow_id}"
+    operation = workflows_client.delete_workflow(request=delete_request)
+    operation.result()
+
+    print("Deleting cronjob")
+    delete_request = scheduler_v1.DeleteJobRequest()
+    delete_request.name = f"projects/{PROJECT_ID}/locations/{REGION}/jobs/{workflow_id}"
+    scheduler_client.delete_job(request=delete_request)
 
 
 if __name__ == '__main__':
