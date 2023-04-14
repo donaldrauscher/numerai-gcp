@@ -2,7 +2,7 @@ import json, os, datetime, time, re
 from typing import List
 from textwrap import dedent
 
-import click
+import click, docker
 import pandas as pd
 from jinja2 import Template
 
@@ -18,6 +18,7 @@ CLOUD_STORAGE_PATH = "numerai"
 batch_client = batch_v1.BatchServiceClient()
 storage_client = storage.Client()
 workflows_client = workflows.WorkflowsClient()
+docker_client = docker.from_env()
 
 
 def create_container_runnable(model_id: str, commands: List[str]) -> batch_v1.Runnable:
@@ -110,6 +111,31 @@ def create_batch_job(job_name: str, task: batch_v1.TaskSpec, task_count: int) ->
     return batch_client.create_job(create_request)
 
 
+def build_and_push_image(model_id: str):
+    print("Building image")
+    _, build_logs = docker_client.images.build(
+        path=os.path.join('models', model_id),
+        tag=f"gcr.io/blog-180218/numerai:{model_id}"
+    )
+    for l in build_logs:
+        if 'stream' in l.keys():
+            print(l['stream'].strip('\n'))
+
+    print("Pushing image")
+    push_logs = docker_client.images.push(
+        repository="gcr.io/blog-180218/numerai",
+        tag=model_id,
+        stream=True,
+        decode=True
+    )
+    for l in push_logs:
+        if 'status' in l.keys():
+            print(l['status'].strip('\n'))
+
+    print("Pruning dangling images")
+    docker_client.images.prune(filters={'dangling': True})
+
+
 @click.group()
 @click.option('--model-id', type=str)
 @click.option('--overwrite/--no-overwrite', default=False)
@@ -123,8 +149,11 @@ def cli(ctx, model_id, overwrite):
 @cli.command()
 @click.pass_context
 def train(ctx):
+    build_and_push_image(ctx.obj['MODEL_ID'])
+
     with open(os.path.join('models', ctx.obj['MODEL_ID'], 'params.json'), 'r') as f:
         task_count = len(json.load(f))
+
     job_name = f"numerai-{ctx.obj['MODEL_ID']}-train-{datetime.datetime.now().strftime('%Y-%m-%dt%H-%M-%S')}"
     task = create_training_task(ctx)
     job = create_batch_job(job_name, task, task_count)
