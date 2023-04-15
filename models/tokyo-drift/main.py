@@ -323,7 +323,7 @@ def train(ctx):
     print("Calculating metrics on validation data")
     validation_stats = validation_metrics(
         all_data.loc[validation_index, :], ["pred_ensemble", "pred_ensemble_neutral"],
-        example_col=EXAMPLE_PREDS_COL, target_col=TARGET_COL, fast_mode=ctx.obj['TEST']
+        example_col=EXAMPLE_PREDS_COL, target_col=TARGET_COL, fast_mode=True
     )
     print(validation_stats[["mean", "sharpe", "corr_with_example_preds"]].to_markdown())
 
