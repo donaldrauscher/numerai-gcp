@@ -1,8 +1,7 @@
 [
   {
     "dataset_params": {
-      "version": "v4.1",
-      "feature_set": "medium"
+      "version": "v4.1"
     },
     "model_params": {
       "objective": "MultiRMSE",
@@ -13,13 +12,21 @@
       "colsample_bylevel": 0.1
     },
     "ensemble_params": {
+      "targets": [
+        "target_nomi_v4_20",
+        "target_jerome_v4_20",
+        "target_ralph_v4_60",
+        "target_tyler_v4_20",
+        "target_victor_v4_60",
+        "target_waldo_v4_20"
+      ],
       "alpha": 0.05,
       "fit_intercept": false,
       "positive": true
     },
     "neutralize_params": {
       "strategy": "all_features",
-      "proportion": 0.5
+      "proportion": 0.25
     }
   }
 ]

@@ -211,6 +211,13 @@ def train(ctx):
     training_data, validation_data = load_training_data(ctx)
     features = list(training_data.filter(like='feature_').columns)
 
+    # medium feature set for fncv3
+    with open(ctx.obj['DATASETS']['features'], "r") as f:
+        feature_metadata = json.load(f)
+
+    features_for_neutralization = feature_metadata["feature_sets"]['medium']
+    features_for_neutralization = list(set(features_for_neutralization).intersection(set(features)))
+
     # reduce the number of eras to every 4th era to speed things up
     if ctx.obj['TEST']:
         every_4th_era = training_data[ERA_COL].unique()[::4]
@@ -276,17 +283,20 @@ def train(ctx):
         all_data.loc[target_train_index, ['target_nomi_v4_20']]
     )
 
-    all_data.loc[validation_index, ['target_pred_ensemble']] = ensembler.predict(
+    all_data.loc[validation_index, ['pred_ensemble']] = ensembler.predict(
         all_data.loc[validation_index, targets_pred])
 
     out = os.path.join(ctx.obj['MODEL_RUN_PATH'], 'models', 'ensembler.pkl')
     pd.to_pickle(ensembler, out)
 
+    for t,w in zip(targets, ensembler.coef_.flatten()):
+        print(f"   {t} weight: {w}")
+
     # neutralize
     print("Neutralizing predictions on validation data")
-    all_data["half_neutral_target_pred_ensemble"] = neutralize(
+    all_data["pred_ensemble_neutral"] = neutralize(
         df=all_data.loc[validation_index, :],
-        columns=["target_pred_ensemble"],
+        columns=["pred_ensemble"],
         neutralizers=features,
         proportion=ctx.obj['PARAMS']['neutralize_params']['proportion'],
         normalize=True,
@@ -299,10 +309,11 @@ def train(ctx):
     # calculate metrics
     print("Calculating metrics on validation data")
     validation_stats = validation_metrics(
-        all_data.loc[validation_index, :], ["target_pred_ensemble", "half_neutral_target_pred_ensemble"],
-        example_col=EXAMPLE_PREDS_COL, target_col=TARGET_COL, fast_mode=ctx.obj['TEST']
+        all_data.loc[validation_index, :], ["pred_ensemble", "pred_ensemble_neutral"],
+        example_col=EXAMPLE_PREDS_COL, target_col=TARGET_COL,
+        features_for_neutralization=features_for_neutralization
     )
-    print(validation_stats[["mean", "sharpe"]].to_markdown())
+    print(validation_stats[["mean", "sharpe", "feature_neutral_mean", "corr_with_example_preds"]].to_markdown())
 
     gc.collect()
 
