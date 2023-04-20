@@ -58,15 +58,15 @@ def cli(ctx, run_id, data_dir, test, overwrite):
     ctx.obj['DATASETS'] = {
         'train': make_path('train_int8.parquet'),
         'validation': make_path('validation_int8.parquet'),
-        'live': make_path(f'live_int8_{current_round}.parquet'),
         'validation_example_preds': make_path('validation_example_preds.parquet'),
         'features': make_path('features.json')
     }
 
     # this is where we'll save our submissions
     submission_dir = os.path.join(data_dir, 'submissions', MODEL_ID, str(run_id))
-    os.makedirs(submission_dir, exist_ok=True)
+    os.makedirs(os.path.join(submission_dir, dataset_version), exist_ok=True)
     ctx.obj['SUBMISSION_PATH'] = os.path.join(submission_dir, f"live_predictions_{current_round}.csv")
+    ctx.obj['DATASETS']['live'] = os.path.join(submission_dir, dataset_version, f'live_int8_{current_round}.parquet')
 
 
 @cli.command()
