@@ -8,7 +8,7 @@ import json
 from scipy.stats import skew
 
 ERA_COL = "era"
-TARGET_COL = "target_nomi_v4_20"
+TARGET_COL = "target_cyrus_v4_20"
 DATA_TYPE_COL = "data_type"
 EXAMPLE_PREDS_COL = "example_preds"
 
@@ -238,6 +238,19 @@ def exposure_dissimilarity_per_era(df, prediction_col, example_col, feature_cols
     return 1 - (np.dot(u, e) / np.dot(e, e))
 
 
+def numerai_corr(preds, target):
+    # rank (keeping ties) then Gaussianize predictions to standardize prediction distributions
+    ranked_preds = (preds.rank(method="average").values - 0.5) / preds.count()
+    gauss_ranked_preds = scipy.stats.norm.ppf(ranked_preds)
+    # make targets centered around 0. This assumes the targets have a mean of 0.5
+    centered_target = target - 0.5
+    # raise both preds and target to the power of 1.5 to accentuate the tails
+    preds_p15 = np.sign(gauss_ranked_preds) * np.abs(gauss_ranked_preds) ** 1.5
+    target_p15 = np.sign(centered_target) * np.abs(centered_target) ** 1.5
+    # finally return the Pearson correlation
+    return np.corrcoef(preds_p15, target_p15)[0, 1]
+
+
 def validation_metrics(
     validation_data,
     pred_cols,
@@ -251,7 +264,7 @@ def validation_metrics(
     for pred_col in pred_cols:
         # Check the per-era correlations on the validation set (out of sample)
         validation_correlations = validation_data.groupby(ERA_COL).apply(
-            lambda d: unif(d[pred_col]).corr(d[target_col])
+            lambda d: numerai_corr(d[pred_col], d[target_col])
         )
 
         mean = validation_correlations.mean()

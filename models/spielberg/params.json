@@ -28,5 +28,35 @@
       "strategy": "all_features",
       "proportion": 0.25
     }
+  },
+  {
+    "dataset_params": {
+      "version": "v4.1"
+    },
+    "model_params": {
+      "objective": "MultiRMSE",
+      "iterations": 2000,
+      "learning_rate": 0.01,
+      "depth": 5,
+      "max_leaves": 32,
+      "colsample_bylevel": 0.1
+    },
+    "ensemble_params": {
+      "targets": [
+        "target_nomi_v4_20",
+        "target_ralph_v4_20",
+        "target_cyrus_v4_20",
+        "target_caroline_v4_20",
+        "target_sam_v4_20",
+        "target_xerxes_v4_20"
+      ],
+      "alpha": 0.05,
+      "fit_intercept": false,
+      "positive": true
+    },
+    "neutralize_params": {
+      "strategy": "all_features",
+      "proportion": 0.25
+    }
   }
 ]
