@@ -14,11 +14,11 @@
     "strategy": "equal_weight",
     "targets": [
       "target_nomi_v4_20",
-      "target_jerome_v4_60",
       "target_ralph_v4_20",
-      "target_tyler_v4_20",
-      "target_victor_v4_20",
-      "target_waldo_v4_20"
+      "target_cyrus_v4_20",
+      "target_caroline_v4_20",
+      "target_sam_v4_20",
+      "target_xerxes_v4_20"
     ]
   },
   "neutralize_params": {
