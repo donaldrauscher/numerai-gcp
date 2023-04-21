@@ -202,6 +202,13 @@ def train(ctx):
     training_data, validation_data = load_training_data(ctx)
     features = list(training_data.filter(like='feature_').columns)
 
+    # medium feature set for fncv3
+    with open(ctx.obj['DATASETS']['features'], "r") as f:
+        feature_metadata = json.load(f)
+
+    features_for_neutralization = feature_metadata["feature_sets"]['medium']
+    features_for_neutralization = list(set(features_for_neutralization).intersection(set(features)))
+
     # reduce the number of eras to every 4th era to speed things up
     if ctx.obj['TEST']:
         every_4th_era = training_data[ERA_COL].unique()[::4]
@@ -323,7 +330,8 @@ def train(ctx):
     print("Calculating metrics on validation data")
     validation_stats = validation_metrics(
         all_data.loc[validation_index, :], ["pred_ensemble", "pred_ensemble_neutral"],
-        example_col=EXAMPLE_PREDS_COL, target_col=TARGET_COL, fast_mode=True
+        example_col=EXAMPLE_PREDS_COL, target_col=TARGET_COL, fast_mode=False,
+        features_for_neutralization=features_for_neutralization
     )
     print(validation_stats[["mean", "sharpe", "corr_with_example_preds"]].to_markdown())
 

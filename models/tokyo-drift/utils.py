@@ -8,7 +8,7 @@ import json
 from scipy.stats import skew
 
 ERA_COL = "era"
-TARGET_COL = "target_nomi_v4_20"
+TARGET_COL = "target_cyrus_v4_20"
 DATA_TYPE_COL = "data_type"
 EXAMPLE_PREDS_COL = "example_preds"
 
@@ -238,6 +238,19 @@ def exposure_dissimilarity_per_era(df, prediction_col, example_col, feature_cols
     return 1 - (np.dot(u, e) / np.dot(e, e))
 
 
+def numerai_corr(preds, target):
+    # rank (keeping ties) then Gaussianize predictions to standardize prediction distributions
+    ranked_preds = (preds.rank(method="average").values - 0.5) / preds.count()
+    gauss_ranked_preds = scipy.stats.norm.ppf(ranked_preds)
+    # make targets centered around 0. This assumes the targets have a mean of 0.5
+    centered_target = target - 0.5
+    # raise both preds and target to the power of 1.5 to accentuate the tails
+    preds_p15 = np.sign(gauss_ranked_preds) * np.abs(gauss_ranked_preds) ** 1.5
+    target_p15 = np.sign(centered_target) * np.abs(centered_target) ** 1.5
+    # finally return the Pearson correlation
+    return np.corrcoef(preds_p15, target_p15)[0, 1]
+
+
 def validation_metrics(
     validation_data,
     pred_cols,
@@ -251,7 +264,7 @@ def validation_metrics(
     for pred_col in pred_cols:
         # Check the per-era correlations on the validation set (out of sample)
         validation_correlations = validation_data.groupby(ERA_COL).apply(
-            lambda d: unif(d[pred_col]).corr(d[target_col])
+            lambda d: numerai_corr(d[pred_col], d[target_col])
         )
 
         mean = validation_correlations.mean()
@@ -301,44 +314,44 @@ def validation_metrics(
                 "feature_neutral_mean", pred_col
             ] = feature_neutral_mean
 
-            # Check TB200 feature neutral mean
-            tb200_feature_neutral_mean_era = validation_data.groupby(ERA_COL).apply(
-                lambda df: get_feature_neutral_mean_tb_era(
-                    df, pred_col, target_col, 200, features_for_neutralization
-                )
-            )
-            validation_stats.loc[
-                "tb200_feature_neutral_mean", pred_col
-            ] = tb200_feature_neutral_mean_era.mean()
+            # # Check TB200 feature neutral mean
+            # tb200_feature_neutral_mean_era = validation_data.groupby(ERA_COL).apply(
+            #     lambda df: get_feature_neutral_mean_tb_era(
+            #         df, pred_col, target_col, 200, features_for_neutralization
+            #     )
+            # )
+            # validation_stats.loc[
+            #     "tb200_feature_neutral_mean", pred_col
+            # ] = tb200_feature_neutral_mean_era.mean()
+            #
+            # # Check top and bottom 200 metrics (TB200)
+            # tb200_validation_correlations = fast_score_by_date(
+            #     validation_data, [pred_col], target_col, tb=200, era_col=ERA_COL
+            # )
+            #
+            # tb200_mean = tb200_validation_correlations.mean()[pred_col]
+            # tb200_std = tb200_validation_correlations.std(ddof=0)[pred_col]
+            # tb200_sharpe = tb200_mean / tb200_std
+            #
+            # validation_stats.loc["tb200_mean", pred_col] = tb200_mean
+            # validation_stats.loc["tb200_std", pred_col] = tb200_std
+            # validation_stats.loc["tb200_sharpe", pred_col] = tb200_sharpe
 
-            # Check top and bottom 200 metrics (TB200)
-            tb200_validation_correlations = fast_score_by_date(
-                validation_data, [pred_col], target_col, tb=200, era_col=ERA_COL
-            )
-
-            tb200_mean = tb200_validation_correlations.mean()[pred_col]
-            tb200_std = tb200_validation_correlations.std(ddof=0)[pred_col]
-            tb200_sharpe = tb200_mean / tb200_std
-
-            validation_stats.loc["tb200_mean", pred_col] = tb200_mean
-            validation_stats.loc["tb200_std", pred_col] = tb200_std
-            validation_stats.loc["tb200_sharpe", pred_col] = tb200_sharpe
-
-        # MMC over validation
-        mmc_scores = []
-        corr_scores = []
-        for _, x in validation_data.groupby(ERA_COL):
-            series = neutralize_series(unif(x[pred_col]), (x[example_col]))
-            mmc_scores.append(np.cov(series, x[target_col])[0, 1] / (0.29**2))
-            corr_scores.append(unif(x[pred_col]).corr(x[target_col]))
-
-        val_mmc_mean = np.mean(mmc_scores)
-        val_mmc_std = np.std(mmc_scores)
-        corr_plus_mmcs = [c + m for c, m in zip(corr_scores, mmc_scores)]
-        corr_plus_mmc_sharpe = np.mean(corr_plus_mmcs) / np.std(corr_plus_mmcs)
-
-        validation_stats.loc["mmc_mean", pred_col] = val_mmc_mean
-        validation_stats.loc["corr_plus_mmc_sharpe", pred_col] = corr_plus_mmc_sharpe
+        # # MMC over validation
+        # mmc_scores = []
+        # corr_scores = []
+        # for _, x in validation_data.groupby(ERA_COL):
+        #     series = neutralize_series(unif(x[pred_col]), (x[example_col]))
+        #     mmc_scores.append(np.cov(series, x[target_col])[0, 1] / (0.29**2))
+        #     corr_scores.append(unif(x[pred_col]).corr(x[target_col]))
+        #
+        # val_mmc_mean = np.mean(mmc_scores)
+        # val_mmc_std = np.std(mmc_scores)
+        # corr_plus_mmcs = [c + m for c, m in zip(corr_scores, mmc_scores)]
+        # corr_plus_mmc_sharpe = np.mean(corr_plus_mmcs) / np.std(corr_plus_mmcs)
+        #
+        # validation_stats.loc["mmc_mean", pred_col] = val_mmc_mean
+        # validation_stats.loc["corr_plus_mmc_sharpe", pred_col] = corr_plus_mmc_sharpe
 
         # Check correlation with example predictions
         per_era_corrs = validation_data.groupby(ERA_COL).apply(
