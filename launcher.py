@@ -14,6 +14,7 @@ REGION = "us-central1"
 CLOUD_STORAGE_BUCKET = "djr-data"
 CLOUD_STORAGE_PATH = "numerai"
 COMPUTE_SERVICE_ACCOUNT = "89590359009-compute@developer.gserviceaccount.com"
+NUMERAI_MODEL_PREFIX = "djr"
 
 
 batch_client = batch_v1.BatchServiceClient()
@@ -138,18 +139,33 @@ def build_and_push_image(model_id: str):
     docker_client.images.prune(filters={'dangling': True})
 
 
+def get_numerai_model_name(model_id: str, run_id: str) -> str:
+    return "{}_{}_{}".format(
+        NUMERAI_MODEL_PREFIX,
+        model_id.replace('-', '_'),
+        run_id
+    )
+
+
 def get_workflow_id(numerai_model_name: str) -> str:
-    return f"numerai-submit-{numerai_model_name.replace('_', '-')}"
+    return "numerai-submit-{}".format(
+        numerai_model_name.replace('_', '-')
+    )
 
 
 @click.group()
-@click.option('--model-id', type=str)
+@click.option('--model-id', type=str, required=True)
+@click.option('--run-id', type=str)
 @click.option('--overwrite/--no-overwrite', default=False)
 @click.pass_context
-def cli(ctx, model_id, overwrite):
+def cli(ctx, model_id, run_id, overwrite):
     ctx.ensure_object(dict)
     ctx.obj['MODEL_ID'] = model_id
+    ctx.obj['RUN_ID'] = run_id
     ctx.obj['OVERWRITE'] = overwrite
+
+    if run_id:
+        ctx.obj['NUMERAI_MODEL_NAME'] = get_numerai_model_name(model_id, run_id)
 
 
 @cli.command()
@@ -167,12 +183,18 @@ def train(ctx):
 
 
 @cli.command()
-@click.option('--run-id', type=str, required=True)
-@click.option('--numerai-model-name', default=None)
+@click.option('--upload/--no-upload', default=False)
 @click.pass_context
-def inference(ctx, run_id, numerai_model_name):
-    job_name = f"numerai-{ctx.obj['MODEL_ID']}-{run_id}-inference-{datetime.datetime.now().strftime('%Y-%m-%dt%H-%M-%S')}"
-    task = create_inference_task(ctx, run_id, numerai_model_name)
+def inference(ctx, upload):
+    job_name = "numerai-{}-{}-inference-{}".format(
+        ctx.obj['MODEL_ID'],
+        ctx.obj['RUN_ID'],
+        datetime.datetime.now().strftime('%Y-%m-%dt%H-%M-%S')
+    )
+    if upload:
+        task = create_inference_task(ctx, run_id, ctx.obj['NUMERAI_MODEL_NAME'])
+    else:
+        task = create_inference_task(ctx, run_id, None)
     job = create_batch_job(job_name, task, task_count=1)
     print(job)
 
@@ -191,17 +213,20 @@ def get_metrics(ctx):
         param_index = re.compile(r'([0-9]+)/metrics\.json$').search(b.name).group(1)
         df.insert(0, 'param_index', int(param_index))
         metrics.append(df)
-    metrics = pd.concat(metrics, axis=0)
+
+    metrics = (
+        pd.concat(metrics, axis=0)
+        .filter(['param_index', 'index', 'mean', 'std', 'sharpe', 'max_drawdown', 'corr_with_example_preds', 'feature_neutral_mean'])
+    )
 
     print(metrics)
 
 
 @cli.command()
-@click.option('--run-id', type=str, required=True)
-@click.option('--numerai-model-name', required=True)
 @click.pass_context
-def create_workflow(ctx, run_id, numerai_model_name):
-    workflow_id = get_workflow_id(numerai_model_name)
+def create_workflow(ctx):
+    assert ctx.obj['NUMERAI_MODEL_NAME'] is not None
+    workflow_id = get_workflow_id(ctx.obj['NUMERAI_MODEL_NAME'])
 
     print("Creating workflow")
 
@@ -302,16 +327,16 @@ def create_workflow(ctx, run_id, numerai_model_name):
     """))
     workflow_contents = workflow_contents.render(
         model_id=ctx.obj['MODEL_ID'],
-        run_id=run_id,
+        run_id=ctx.obj['RUN_ID'],
         public_id=os.environ['NUMERAI_PUBLIC_ID'],
         secret_key=os.environ['NUMERAI_SECRET_KEY'],
-        numerai_model_name=numerai_model_name,
+        numerai_model_name=ctx.obj['NUMERAI_MODEL_NAME'],
         gcs_path=os.path.join(CLOUD_STORAGE_BUCKET, CLOUD_STORAGE_PATH) + '/',
         region=REGION
     )
 
     workflow = workflows.Workflow()
-    workflow.name = f"numerai-submit-{numerai_model_name}"
+    workflow.name = workflow_id
     workflow.description = "Workflow which downloads live round, generates predictions, and submits to Numerai"
     workflow.source_contents = workflow_contents
 
@@ -346,10 +371,10 @@ def create_workflow(ctx, run_id, numerai_model_name):
 
 
 @cli.command()
-@click.option('--numerai-model-name', required=True)
 @click.pass_context
-def delete_workflow(ctx, numerai_model_name):
-    workflow_id = get_workflow_id(numerai_model_name)
+def delete_workflow(ctx):
+    assert ctx.obj['NUMERAI_MODEL_NAME'] is not None
+    workflow_id = get_workflow_id(ctx.obj['NUMERAI_MODEL_NAME'])
 
     print("Deleting workflow")
     delete_request = workflows.DeleteWorkflowRequest()

@@ -41,7 +41,8 @@ To launch a training job:
 ```
 python launcher.py \
   [--overwrite] \
-  --model-id [example] \
+  [--test] \
+  --model-id [t800] \
   train
 ```
 
@@ -49,28 +50,24 @@ To launch an inference job:
 ```
 python launcher.py \
   [--overwrite] \
-  --model-id [example] \
+  [--test] \
+  --model-id [t800] \
+  --run-id [0] \
   inference \
-  --run-id [run_id]
-  --numerai-model-name [numerai_model_name]
+  [--upload]
 ```
 
 To get metrics from training job:
 ```
 python launcher.py \
-  --model-id [example] \
+  --model-id [t800] \
   get-metrics
 ```
 
 To create a cronjob + workflow:
 ```
 python launcher.py \
-  --model-id [example] \
-  create-workflow \
-  --run-id [run_id] \
-  --numerai-model-name [numerai_model_name]
+  --model-id [t800] \
+  --run-id [0] \
+  create-workflow
 ```
-
-Notes:
-- If don't specify `numerai_model_name`, it will save output to GCS but not upload to Numerai
-- Unless overwrite flag is included, will only train models that don't exist
