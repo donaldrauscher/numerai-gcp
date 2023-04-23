@@ -114,31 +114,6 @@ def create_batch_job(job_name: str, task: batch_v1.TaskSpec, task_count: int) ->
     return batch_client.create_job(create_request)
 
 
-def build_and_push_image(model_id: str):
-    print("Building image")
-    _, build_logs = docker_client.images.build(
-        path=os.path.join('models', model_id),
-        tag=f"gcr.io/{PROJECT_ID}/numerai:{model_id}"
-    )
-    for l in build_logs:
-        if 'stream' in l.keys():
-            print(l['stream'].strip('\n'))
-
-    print("Pushing image")
-    push_logs = docker_client.images.push(
-        repository=f"gcr.io/{PROJECT_ID}/numerai",
-        tag=model_id,
-        stream=True,
-        decode=True
-    )
-    for l in push_logs:
-        if 'status' in l.keys():
-            print(l['status'].strip('\n'))
-
-    print("Pruning dangling images")
-    docker_client.images.prune(filters={'dangling': True})
-
-
 def get_numerai_model_name(model_id: str, run_id: str) -> str:
     return "{}_{}_{}".format(
         NUMERAI_MODEL_PREFIX,
@@ -170,8 +145,37 @@ def cli(ctx, model_id, run_id, overwrite):
 
 @cli.command()
 @click.pass_context
+def build_and_push_image(ctx):
+    model_id = ctx.obj['MODEL_ID']
+
+    print("Building image")
+    _, build_logs = docker_client.images.build(
+        path=os.path.join('models', model_id),
+        tag=f"gcr.io/{PROJECT_ID}/numerai:{model_id}"
+    )
+    for l in build_logs:
+        if 'stream' in l.keys():
+            print(l['stream'].strip('\n'))
+
+    print("Pushing image")
+    push_logs = docker_client.images.push(
+        repository=f"gcr.io/{PROJECT_ID}/numerai",
+        tag=model_id,
+        stream=True,
+        decode=True
+    )
+    for l in push_logs:
+        if 'status' in l.keys():
+            print(l['status'].strip('\n'))
+
+    print("Pruning dangling images")
+    docker_client.images.prune(filters={'dangling': True})
+
+
+@cli.command()
+@click.pass_context
 def train(ctx):
-    build_and_push_image(ctx.obj['MODEL_ID'])
+    ctx.invoke(build_and_push_image)
 
     with open(os.path.join('models', ctx.obj['MODEL_ID'], 'params.json'), 'r') as f:
         task_count = len(json.load(f))
