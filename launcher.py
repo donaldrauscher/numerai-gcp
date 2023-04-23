@@ -247,83 +247,93 @@ def create_workflow(ctx):
               - numeraiSecretKey: "{{ secret_key }}"
               - numeraiPublicId: "{{ public_id }}"
               - numeraiModelName: "{{ numerai_model_name }}"
-        - createAndRunBatchJob:
-            call: http.post
-            args:
-              url: ${batchApiUrl}
-              query:
-                job_id: ${jobId}
-              headers:
-                Content-Type: application/json
-              auth:
-                type: OAuth2
-              body:
-                taskGroups:
-                  taskSpec:
-                    runnables:
-                      - container:
-                          imageUri: ${imageUri}
-                          commands:
-                            - "--data-dir"
-                            - "/mnt/disks/share"
-                            - "--run-id"
-                            - ${runId}
-                            - "inference"
-                            - "--numerai-model-name"
-                            - ${numeraiModelName}
-                          volumes: "/mnt/disks/share:/mnt/disks/share:rw"
-                        environment:
-                          variables:
-                            NUMERAI_SECRET_KEY: ${numeraiSecretKey}
-                            NUMERAI_PUBLIC_ID: ${numeraiPublicId}
-                    computeResource:
-                      cpuMilli: 30000
-                      memoryMib: 120000
-                    maxRunDuration:
-                      seconds: 43200
-                    volumes:
-                      gcs:
-                        remotePath: "{{ gcs_path }}"
-                      mountPath: "/mnt/disks/share"
-                  taskCount: 1
-                  taskCountPerNode: 1
-                  parallelism: 1
-                allocationPolicy:
-                  instances:
-                    policy:
-                      machineType: "c2-standard-30"
-                logsPolicy:
-                  destination: CLOUD_LOGGING
-            result: createAndRunBatchJobResponse
-        - getJob:
-            call: http.get
-            args:
-              url: ${batchApiUrl + "/" + jobId}
-              auth:
-                type: OAuth2
-            result: getJobResult
-        - logState:
-            call: sys.log
-            args:
-              data: ${"Current job state " + getJobResult.body.status.state}
-        - checkState:
-            switch:
-              - condition: ${getJobResult.body.status.state == "SUCCEEDED"}
-                next: returnResult
-              - condition: ${getJobResult.body.status.state == "FAILED"}
-                next: failExecution
-            next: sleep
-        - sleep:
-            call: sys.sleep
-            args:
-              seconds: 10
-            next: getJob
-        - returnResult:
-            return:
-              jobId: ${jobId}
-        - failExecution:
-            raise:
-              message: ${"The underlying batch job " + jobId + " failed"}
+        - runBatchJobAndWait:
+            try:
+              steps:
+                - makeJobId:
+                    assign:
+                      - jobId: ${"numerai-" + modelId + "-" + runId + "-inference-" + string(int(sys.now()))}
+                - createAndRunBatchJob:
+                    call: http.post
+                    args:
+                      url: ${batchApiUrl}
+                      query:
+                        job_id: ${jobId}
+                      headers:
+                        Content-Type: application/json
+                      auth:
+                        type: OAuth2
+                      body:
+                        taskGroups:
+                          taskSpec:
+                            runnables:
+                              - container:
+                                  imageUri: ${imageUri}
+                                  commands:
+                                    - "--data-dir"
+                                    - "/mnt/disks/share"
+                                    - "--run-id"
+                                    - ${runId}
+                                    - "inference"
+                                    - "--numerai-model-name"
+                                    - ${numeraiModelName}
+                                  volumes: "/mnt/disks/share:/mnt/disks/share:rw"
+                                environment:
+                                  variables:
+                                    NUMERAI_SECRET_KEY: ${numeraiSecretKey}
+                                    NUMERAI_PUBLIC_ID: ${numeraiPublicId}
+                            computeResource:
+                              cpuMilli: 30000
+                              memoryMib: 120000
+                            maxRunDuration:
+                              seconds: 43200
+                            volumes:
+                              gcs:
+                                remotePath: "{{ gcs_path }}"
+                              mountPath: "/mnt/disks/share"
+                          taskCount: 1
+                          taskCountPerNode: 1
+                          parallelism: 1
+                        allocationPolicy:
+                          instances:
+                            policy:
+                              machineType: "c2-standard-16"
+                        logsPolicy:
+                          destination: CLOUD_LOGGING
+                    result: createAndRunBatchJobResponse
+                - getJob:
+                    call: http.get
+                    args:
+                      url: ${batchApiUrl + "/" + jobId}
+                      auth:
+                        type: OAuth2
+                    result: getJobResult
+                - logState:
+                    call: sys.log
+                    args:
+                      data: ${"Batch job " + jobId + " has state " + getJobResult.body.status.state}
+                - checkState:
+                    switch:
+                      - condition: ${getJobResult.body.status.state == "SUCCEEDED"}
+                        next: returnResult
+                      - condition: ${getJobResult.body.status.state == "FAILED"}
+                        next: failExecution
+                    next: sleep
+                - sleep:
+                    call: sys.sleep
+                    args:
+                      seconds: 10
+                    next: getJob
+                - returnResult:
+                    return:
+                      jobId: ${jobId}
+                - failExecution:
+                    raise:
+                      message: ${"The underlying batch job " + jobId + " failed"}
+            retry:
+              max_retries: 1
+              backoff:
+                initial_delay: 1800
     """))
     workflow_contents = workflow_contents.render(
         model_id=ctx.obj['MODEL_ID'],
@@ -359,7 +369,7 @@ def create_workflow(ctx):
     job = scheduler_v1.Job()
     job.name = f"projects/{PROJECT_ID}/locations/{REGION}/jobs/{workflow_id}"
     job.http_target = target
-    job.schedule = "30 13 * * 2-5,7"
+    job.schedule = "20 13 * * 2-5,7"
     job.time_zone = "Etc/UTC"
 
     request = scheduler_v1.CreateJobRequest()
