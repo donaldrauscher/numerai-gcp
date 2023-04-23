@@ -351,7 +351,7 @@ def inference(ctx, numerai_model_name):
     # generate predictions
     print("Generating predictions")
     model = load_model(ctx, model_config['model_key'])
-    model_expected_features = model.feature_names_
+    model_expected_features = model.booster_.feature_name()
     assert set(model_expected_features) == set(features)
     live_data.loc[:, 'pred'] = model.predict(
         live_data.loc[:, model_expected_features])
@@ -362,8 +362,8 @@ def inference(ctx, numerai_model_name):
     live_data["pred_neutral"] = neutralize(
         df=live_data,
         columns=["pred"],
-        neutralizers=ctx.obj['MODEL_CONFIG'].get('neutralizers', features),
-        proportion=ctx.obj['PARAMS']['neutralize_params']['proportion'],
+        neutralizers=model_config.get('neutralizers', features),
+        proportion=ctx.obj['PARAMS']['neutralize_params'].get('proportion', 1.0),
         normalize=True,
         era_col=ERA_COL
     )
