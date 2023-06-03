@@ -131,7 +131,7 @@ def get_workflow_id(numerai_model_name: str) -> str:
 
 
 @click.group()
-@click.option('--model-id', type=str, required=True)
+@click.option('--model-id', type=str)
 @click.option('--run-id', type=str)
 @click.option('--overwrite/--no-overwrite', default=False)
 @click.pass_context
@@ -458,6 +458,33 @@ def delete_workflow(ctx):
     # delete_request.name = functions_client.cloud_function_path(PROJECT_ID, REGION, workflow_id)
     # operation = functions_client.delete_function(request=delete_request)
     # operation.result()
+
+
+@cli.command()
+@click.pass_context
+def round_performance(ctx):
+    napi = NumerAPI()
+    performances = []
+    for model_name, model_id in napi.get_models().items():
+        if model_name.endswith('_test'):
+            continue
+        performance = (
+            pd.DataFrame.from_records(napi.round_model_performances(model_name))
+            .query('roundNumber >= 470')
+            .query('~corr.isnull()')
+            .filter(['corr', 'corrPercentile', 'corrWMetamodel', 'tc', 'tcPercentile', 'fncV3', 'fncV3Percentile'])
+            .mean()
+            .to_frame()
+            .transpose()
+        )
+        performance.insert(0, 'model', model_name)
+        performances.append(performance)
+
+    performances = (
+        pd.concat(performances, axis=0)
+        .sort_values(by=['tc'], ascending=False)
+    )
+    print(performances)
 
 
 if __name__ == '__main__':
