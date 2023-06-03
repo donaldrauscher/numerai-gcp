@@ -5,8 +5,9 @@ from textwrap import dedent
 import click, docker
 import pandas as pd
 from jinja2 import Template
+from numerapi import NumerAPI
 
-from google.cloud import batch_v1, storage, workflows, scheduler_v1
+from google.cloud import batch_v1, storage, workflows, scheduler_v1, functions_v1
 
 
 PROJECT_ID = "blog-180218"
@@ -21,6 +22,7 @@ batch_client = batch_v1.BatchServiceClient()
 storage_client = storage.Client()
 workflows_client = workflows.WorkflowsClient()
 scheduler_client = scheduler_v1.CloudSchedulerClient()
+functions_client = functions_v1.CloudFunctionsServiceClient()
 docker_client = docker.from_env()
 
 
@@ -363,25 +365,75 @@ def create_workflow(ctx):
     response = operation.result()
     print(response)
 
-    print("Create cronjob to trigger workflow")
+    # print("Create cronjob to trigger workflow")
+    #
+    # target = scheduler_v1.HttpTarget()
+    # target.uri = f"https://workflowexecutions.googleapis.com/v1/projects/{PROJECT_ID}/locations/{REGION}/workflows/{workflow_id}/executions"
+    # target.http_method = 1 # post
+    # target.oauth_token = scheduler_v1.OAuthToken(service_account_email=COMPUTE_SERVICE_ACCOUNT)
+    #
+    # job = scheduler_v1.Job()
+    # job.name = f"projects/{PROJECT_ID}/locations/{REGION}/jobs/{workflow_id}"
+    # job.http_target = target
+    # job.schedule = "20 13 * * 2-5,7"
+    # job.time_zone = "Etc/UTC"
+    #
+    # request = scheduler_v1.CreateJobRequest()
+    # request.parent = f"projects/{PROJECT_ID}/locations/{REGION}"
+    # request.job = job
+    #
+    # response = scheduler_client.create_job(request)
+    # print(response)
 
-    target = scheduler_v1.HttpTarget()
-    target.uri = f"https://workflowexecutions.googleapis.com/v1/projects/{PROJECT_ID}/locations/{REGION}/workflows/{workflow_id}/executions"
-    target.http_method = 1 # post
-    target.oauth_token = scheduler_v1.OAuthToken(service_account_email=COMPUTE_SERVICE_ACCOUNT)
+    print("Creating cloud function for Numerai webhook")
 
-    job = scheduler_v1.Job()
-    job.name = f"projects/{PROJECT_ID}/locations/{REGION}/jobs/{workflow_id}"
-    job.http_target = target
-    job.schedule = "20 13 * * 2-5,7"
-    job.time_zone = "Etc/UTC"
+    function_path = functions_client.cloud_function_path(PROJECT_ID, REGION, workflow_id)
 
-    request = scheduler_v1.CreateJobRequest()
-    request.parent = f"projects/{PROJECT_ID}/locations/{REGION}"
-    request.job = job
+    function = functions_v1.CloudFunction()
+    function.name = function_path
+    function.description = f"Webhook for {ctx.obj['NUMERAI_MODEL_NAME']}"
+    function.runtime = 'python310'
+    function.entry_point = 'trigger_workflow'
+    function.source_archive_url = os.path.join(f'gs://{CLOUD_STORAGE_BUCKET}', CLOUD_STORAGE_PATH, 'functions/webhook.zip')
+    function.https_trigger = {
+        'url': f'https://{REGION}-{PROJECT_ID}.cloudfunctions.net/{workflow_id}'
+    }
+    function.environment_variables = {
+        'WORKFLOW_NAME': workflow_id
+    }
 
-    response = scheduler_client.create_job(request)
-    print(response)
+    # deploy function
+    operation = functions_client.create_function(
+        request={
+            'location': functions_client.common_location_path(PROJECT_ID, REGION),
+            'function': function
+        }
+    )
+    response = operation.result()
+    print('Function deployed successfully')
+
+    # make function accessible without authentication
+    set_iam_policy_request_body = {
+        "bindings": [
+            {
+              "role": "roles/cloudfunctions.invoker",
+              "members": ["allUsers"],
+            },
+        ]
+    }
+    functions_client.set_iam_policy({
+        'resource': function_path,
+        'policy': set_iam_policy_request_body
+    })
+
+    # update webhook
+    napi = NumerAPI()
+    model_id = napi.get_models()[ctx.obj['NUMERAI_MODEL_NAME']]
+    napi.set_submission_webhook(
+        model_id=model_id,
+        webhook=response.https_trigger.url
+    )
+    print('Updated webhook')
 
 
 @cli.command()
@@ -400,6 +452,12 @@ def delete_workflow(ctx):
     delete_request = scheduler_v1.DeleteJobRequest()
     delete_request.name = f"projects/{PROJECT_ID}/locations/{REGION}/jobs/{workflow_id}"
     scheduler_client.delete_job(request=delete_request)
+
+    # print("Deleting webhook")
+    # delete_request = functions_v1.DeleteFunctionRequest()
+    # delete_request.name = functions_client.cloud_function_path(PROJECT_ID, REGION, workflow_id)
+    # operation = functions_client.delete_function(request=delete_request)
+    # operation.result()
 
 
 if __name__ == '__main__':

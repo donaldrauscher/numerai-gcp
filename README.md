@@ -37,6 +37,12 @@ ln -s ../../data data
 
 ### Launching Jobs
 
+First, start by archiving webhook cloud function and copying to GCS:
+```
+zip -r webhook.zip ./webhook
+gsutil cp webhook.zip gs://djr-data/numerai/functions/
+```
+
 To launch a training job:
 ```
 python launcher.py \
