@@ -216,10 +216,6 @@ def train(ctx):
         print("Model has already been trained")
         return
 
-    # #
-    # meta_model = pd.read_parquet(ctx.obj['DATASETS']['meta_model'])
-    # import pdb; pdb.set_trace()
-
     # load data
     print("Loading data")
     training_data, validation_data = load_training_data(ctx)
