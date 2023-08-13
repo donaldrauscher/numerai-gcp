@@ -39,7 +39,7 @@ ln -s ../../data data
 
 First, start by archiving webhook cloud function and copying to GCS:
 ```
-zip -r webhook.zip ./webhook
+zip -jr webhook.zip ./webhook
 gsutil cp webhook.zip gs://djr-data/numerai/functions/
 ```
 

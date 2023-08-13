@@ -16,6 +16,7 @@ CLOUD_STORAGE_BUCKET = "djr-data"
 CLOUD_STORAGE_PATH = "numerai"
 COMPUTE_SERVICE_ACCOUNT = "89590359009-compute@developer.gserviceaccount.com"
 NUMERAI_MODEL_PREFIX = "djr"
+WEBHOOK_FUNCTION_NAME = "numerai-webhook"
 
 
 batch_client = batch_v1.BatchServiceClient()
@@ -230,6 +231,60 @@ def get_metrics(ctx):
 
 @cli.command()
 @click.pass_context
+def create_webhook(ctx):
+
+    print("Creating cloud function for Numerai webhook")
+    function_path = functions_client.cloud_function_path(PROJECT_ID, REGION, WEBHOOK_FUNCTION_NAME)
+
+    function = functions_v1.CloudFunction()
+    function.name = function_path
+    function.description = "Function to receive Numerai webhook calls"
+    function.runtime = 'python310'
+    function.entry_point = 'trigger_workflow'
+    function.source_archive_url = os.path.join(f'gs://{CLOUD_STORAGE_BUCKET}', CLOUD_STORAGE_PATH, 'functions/webhook.zip')
+    function.https_trigger = {
+        'url': f'https://{REGION}-{PROJECT_ID}.cloudfunctions.net/{WEBHOOK_FUNCTION_NAME}'
+    }
+
+    # deploy function
+    operation = functions_client.create_function(
+        request={
+            'location': functions_client.common_location_path(PROJECT_ID, REGION),
+            'function': function
+        }
+    )
+    response = operation.result()
+    print('Function deployed successfully')
+
+    # make function accessible without authentication
+    set_iam_policy_request_body = {
+        "bindings": [
+            {
+              "role": "roles/cloudfunctions.invoker",
+              "members": ["allUsers"],
+            },
+        ]
+    }
+    functions_client.set_iam_policy({
+        'resource': function_path,
+        'policy': set_iam_policy_request_body
+    })
+
+    print(f"Webhook URL: {response.https_trigger.url}")
+
+
+@cli.command()
+@click.pass_context
+def delete_webhook(ctx):
+    print("Deleting webhook")
+    delete_request = functions_v1.DeleteFunctionRequest()
+    delete_request.name = functions_client.cloud_function_path(PROJECT_ID, REGION, WEBHOOK_FUNCTION_NAME)
+    operation = functions_client.delete_function(request=delete_request)
+    operation.result()
+
+
+@cli.command()
+@click.pass_context
 def create_workflow(ctx):
     assert ctx.obj['NUMERAI_MODEL_NAME'] is not None
     workflow_id = get_workflow_id(ctx.obj['NUMERAI_MODEL_NAME'])
@@ -365,73 +420,13 @@ def create_workflow(ctx):
     response = operation.result()
     print(response)
 
-    # print("Create cronjob to trigger workflow")
-    #
-    # target = scheduler_v1.HttpTarget()
-    # target.uri = f"https://workflowexecutions.googleapis.com/v1/projects/{PROJECT_ID}/locations/{REGION}/workflows/{workflow_id}/executions"
-    # target.http_method = 1 # post
-    # target.oauth_token = scheduler_v1.OAuthToken(service_account_email=COMPUTE_SERVICE_ACCOUNT)
-    #
-    # job = scheduler_v1.Job()
-    # job.name = f"projects/{PROJECT_ID}/locations/{REGION}/jobs/{workflow_id}"
-    # job.http_target = target
-    # job.schedule = "20 13 * * 2-5,7"
-    # job.time_zone = "Etc/UTC"
-    #
-    # request = scheduler_v1.CreateJobRequest()
-    # request.parent = f"projects/{PROJECT_ID}/locations/{REGION}"
-    # request.job = job
-    #
-    # response = scheduler_client.create_job(request)
-    # print(response)
-
-    print("Creating cloud function for Numerai webhook")
-
-    function_path = functions_client.cloud_function_path(PROJECT_ID, REGION, workflow_id)
-
-    function = functions_v1.CloudFunction()
-    function.name = function_path
-    function.description = f"Webhook for {ctx.obj['NUMERAI_MODEL_NAME']}"
-    function.runtime = 'python310'
-    function.entry_point = 'trigger_workflow'
-    function.source_archive_url = os.path.join(f'gs://{CLOUD_STORAGE_BUCKET}', CLOUD_STORAGE_PATH, 'functions/webhook.zip')
-    function.https_trigger = {
-        'url': f'https://{REGION}-{PROJECT_ID}.cloudfunctions.net/{workflow_id}'
-    }
-    function.environment_variables = {
-        'WORKFLOW_NAME': workflow_id
-    }
-
-    # deploy function
-    operation = functions_client.create_function(
-        request={
-            'location': functions_client.common_location_path(PROJECT_ID, REGION),
-            'function': function
-        }
-    )
-    response = operation.result()
-    print('Function deployed successfully')
-
-    # make function accessible without authentication
-    set_iam_policy_request_body = {
-        "bindings": [
-            {
-              "role": "roles/cloudfunctions.invoker",
-              "members": ["allUsers"],
-            },
-        ]
-    }
-    functions_client.set_iam_policy({
-        'resource': function_path,
-        'policy': set_iam_policy_request_body
-    })
-
     # update webhook
     napi = NumerAPI()
     model_id = napi.get_models()[ctx.obj['NUMERAI_MODEL_NAME']]
+    webhook_url = f'https://{REGION}-{PROJECT_ID}.cloudfunctions.net/{WEBHOOK_FUNCTION_NAME}?model_name={ctx.obj["NUMERAI_MODEL_NAME"]}'
     napi.set_submission_webhook(
         model_id=model_id,
-        webhook=response.https_trigger.url
+        webhook=webhook_url
     )
     print('Updated webhook')
 
@@ -447,17 +442,6 @@ def delete_workflow(ctx):
     delete_request.name = f"projects/{PROJECT_ID}/locations/{REGION}/workflows/{workflow_id}"
     operation = workflows_client.delete_workflow(request=delete_request)
     operation.result()
-
-    print("Deleting cronjob")
-    delete_request = scheduler_v1.DeleteJobRequest()
-    delete_request.name = f"projects/{PROJECT_ID}/locations/{REGION}/jobs/{workflow_id}"
-    scheduler_client.delete_job(request=delete_request)
-
-    # print("Deleting webhook")
-    # delete_request = functions_v1.DeleteFunctionRequest()
-    # delete_request.name = functions_client.cloud_function_path(PROJECT_ID, REGION, workflow_id)
-    # operation = functions_client.delete_function(request=delete_request)
-    # operation.result()
 
 
 @cli.command()
