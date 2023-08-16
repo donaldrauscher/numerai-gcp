@@ -262,13 +262,25 @@ def train(ctx):
     all_data[features] = all_data[features].fillna(na_impute)
     all_data[features] = all_data[features].astype("int8")
 
+    # neutralize target
+    all_data["target_neutral"] = neutralize(
+        df=all_data,
+        columns=[ctx.obj['PARAMS']['target_params']['target_col']],
+        neutralizers=fncv3_features,
+        proportion=1.0,
+        normalize=True,
+        era_col=ERA_COL,
+        verbose=True,
+    )
+    gc.collect()
+
     # train models
     train_model(
         ctx,
         model_key='train_mean',
         model_class=LGBMRegressor,
         params=ctx.obj['PARAMS']['model_params'],
-        target_col=ctx.obj['PARAMS']['target_params']['target_col'],
+        target_col='target_neutral',
         all_data=all_data,
         training_index=training_index,
         validation_index=validation_index,
@@ -280,7 +292,7 @@ def train(ctx):
         model_key='train_var',
         model_class=CatBoostRegressor,
         params=ctx.obj['PARAMS']['var_model_params'],
-        target_col=ctx.obj['PARAMS']['target_params']['target_col'],
+        target_col='target_neutral',
         all_data=all_data,
         training_index=training_index,
         validation_index=validation_index,
@@ -288,34 +300,12 @@ def train(ctx):
     )
 
     all_data.loc[validation_index, 'pred'] = 1 - \
-        norm.cdf(0.5, loc=all_data.loc[validation_index, 'pred_mean'], scale=all_data.loc[validation_index, 'pred_var']**(1/2))
-
-    # neutralize
-    print("Neutralizing predictions on validation data")
-
-    if ctx.obj['PARAMS']['neutralize_params']['strategy'] == 'top_k_riskiest_features':
-        all_feature_corrs = all_data.loc[training_index, :].groupby(ERA_COL).apply(
-            lambda era: era[features].corrwith(era[TARGET_COL]))
-        neutralizers = get_biggest_change_features(all_feature_corrs, ctx.obj['PARAMS']['neutralize_params']['n_features'])
-    elif ctx.obj['PARAMS']['neutralize_params']['strategy'] == 'all_features':
-        neutralizers = features
-
-    all_data["pred_neutral"] = neutralize(
-        df=all_data.loc[validation_index, :],
-        columns=["pred"],
-        neutralizers=neutralizers,
-        proportion=ctx.obj['PARAMS']['neutralize_params'].get('proportion', 1),
-        normalize=True,
-        era_col=ERA_COL,
-        verbose=True,
-    )
-
-    gc.collect()
+        norm.cdf(0, loc=all_data.loc[validation_index, 'pred_mean'], scale=all_data.loc[validation_index, 'pred_var']**(1/2))
 
     # calculate metrics
     print("Calculating metrics on validation data")
     validation_stats = validation_metrics(
-        all_data.loc[validation_index, :], ["pred", "pred_neutral"],
+        all_data.loc[validation_index, :], ["pred"],
         example_col=EXAMPLE_PREDS_COL, target_col=TARGET_COL, fast_mode=False,
         features_for_neutralization=fncv3_features
     )
@@ -351,9 +341,6 @@ def train(ctx):
         "model_key_var": ("train" if ctx.obj['TEST'] else "all_date") + '_var',
         "na_impute": na_impute,
     }
-
-    if ctx.obj['PARAMS']['neutralize_params']['strategy'] == 'top_k_riskiest_features':
-        model_config['neutralizers'] = neutralizers
 
     # save params, metrics, and configuration
     print("Saving final config, parameters, and metrics")
@@ -400,24 +387,13 @@ def inference(ctx, numerai_model_name):
     live_data.loc[:, 'pred_mean'] = model_mean.predict(live_data.loc[:, model_expected_features])
     live_data.loc[:, 'pred_var'] = model_var.predict(live_data.loc[:, model_expected_features])[:,1]
     live_data.loc[:, 'pred'] = 1 - \
-        norm.cdf(0.5, loc=live_data.loc[:, 'pred_mean'], scale=live_data.loc[:, 'pred_var']**(1/2))
+        norm.cdf(0, loc=live_data.loc[:, 'pred_mean'], scale=live_data.loc[:, 'pred_var']**(1/2))
 
     gc.collect()
 
-    # neutralize
-    print("Neutralizing predictions")
-    live_data["pred_neutral"] = neutralize(
-        df=live_data,
-        columns=["pred"],
-        neutralizers=model_config.get('neutralizers', features),
-        proportion=ctx.obj['PARAMS']['neutralize_params'].get('proportion', 1.0),
-        normalize=True,
-        era_col=ERA_COL
-    )
-
     # export
     print("Exporting predictions")
-    live_data["prediction"] = live_data['pred_neutral'].rank(pct=True)
+    live_data["prediction"] = live_data['pred'].rank(pct=True)
     live_data["prediction"].to_csv(ctx.obj['SUBMISSION_PATH'])
 
     # upload predictions

@@ -1,6 +1,6 @@
 {
   "dataset_params": {
-    "version": "v4",
+    "version": "v4.1",
     "feature_set": "small"
   },
   "target_params": {
@@ -20,9 +20,5 @@
     "grow_policy": "Depthwise",
     "colsample_bylevel": 0.25,
     "min_data_in_leaf": 20
-  },
-  "neutralize_params": {
-    "strategy": "all_features",
-    "proportion": 0.25
   }
 }

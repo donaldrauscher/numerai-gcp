@@ -21,10 +21,6 @@
       "grow_policy": "Depthwise",
       "colsample_bylevel": 0.25,
       "min_data_in_leaf": 20
-    },
-    "neutralize_params": {
-      "strategy": "all_features",
-      "proportion": 0.5
     }
   }
 ]
