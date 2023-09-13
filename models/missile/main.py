@@ -106,7 +106,7 @@ def download_all(ctx):
 @cli.command()
 @click.pass_context
 def download_for_training(ctx):
-    if ctx.obj['RUN_ID'] != 0:
+    if int(os.environ.get('BATCH_TASK_INDEX', -1)) != 0:
         print("Skipping download because not first task")
         return
     for dataset in ctx.obj['DATASETS'].keys():
@@ -248,9 +248,13 @@ def train(ctx):
 
     # fill in NAs
     print("Cleaning up NAs")
+    na_counts = all_data[features].isna().sum()
     na_impute = all_data[features].median(skipna=True).to_dict()
-    all_data[features] = all_data[features].fillna(na_impute)
-    all_data[features] = all_data[features].astype("int8")
+    if na_counts.sum() > 0:
+        # na_impute are floats so the .fillna will cast to float which blows up memory
+        # recast to int8 afterwards but this will cause a memory spike
+        all_data[features] = all_data[features].fillna(na_impute)
+        all_data[features] = all_data[features].astype("int8")
 
     # neutralize target
     all_data["target_neutral"] = neutralize(
@@ -264,7 +268,7 @@ def train(ctx):
     )
     gc.collect()
 
-    # train models
+    # train model
     train_model(
         ctx,
         model_key='train',
@@ -275,6 +279,19 @@ def train(ctx):
         validation_index=validation_index
     )
 
+    # calculate metrics
+    print("Calculating metrics on validation data")
+    validation_stats = validation_metrics(
+        all_data.loc[validation_index, :], ["pred"],
+        example_col=EXAMPLE_PREDS_COL, target_col=TARGET_COL, fast_mode=False,
+        features_for_neutralization=fncv3_features
+    )
+    validation_stats['last_era'] = all_data[ERA_COL].max()
+    print(validation_stats[["mean", "sharpe", "max_drawdown", "feature_neutral_mean"]].to_markdown())
+
+    gc.collect()
+
+    # train final model
     if not ctx.obj['TEST']:
         train_model(
             ctx,
@@ -284,17 +301,6 @@ def train(ctx):
             all_data=all_data,
             training_index=all_index
         )
-
-    # calculate metrics
-    print("Calculating metrics on validation data")
-    validation_stats = validation_metrics(
-        all_data.loc[validation_index, :], ["pred"],
-        example_col=EXAMPLE_PREDS_COL, target_col=TARGET_COL, fast_mode=False,
-        features_for_neutralization=fncv3_features
-    )
-    print(validation_stats[["mean", "sharpe"]].to_markdown())
-
-    gc.collect()
 
     # final model config
     model_config = {

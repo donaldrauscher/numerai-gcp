@@ -40,19 +40,22 @@ def create_container_runnable(model_id: str, commands: List[str]) -> batch_v1.Ru
 
 
 def create_training_task(ctx: click.Context) -> batch_v1.TaskSpec:
-    def add_overwrite(commands: List[str]):
+    def add_args(commands: List[str]):
+        add_to_commands = []
         if ctx.obj['OVERWRITE']:
-            commands = ['--overwrite'] + commands
-        return commands
+            add_to_commands += ['--overwrite'] + commands
+        if ctx.obj['RUN_ID'] is not None:
+            add_to_commands += ["--run-id", ctx.obj['RUN_ID']]
+        return add_to_commands + commands
 
     # download-for-training will only run for BATCH_TASK_INDEX=0
-    runnable1 = create_container_runnable(ctx.obj['MODEL_ID'], add_overwrite(["download-for-training"]))
+    runnable1 = create_container_runnable(ctx.obj['MODEL_ID'], add_args(["download-for-training"]))
 
     # this ensures that BATCH_TASK_INDEX>1 waits for BATCH_TASK_INDEX=0 to complete download
     runnable2 = batch_v1.Runnable()
     runnable2.barrier = batch_v1.Runnable.Barrier()
 
-    runnable3 = create_container_runnable(ctx.obj['MODEL_ID'], add_overwrite(["train"]))
+    runnable3 = create_container_runnable(ctx.obj['MODEL_ID'], add_args(["train"]))
 
     task = batch_v1.TaskSpec()
     task.runnables = [runnable1, runnable2, runnable3]
@@ -74,8 +77,8 @@ def create_inference_task(ctx: click.Context, run_id: str, numerai_model_name: s
 
 def create_batch_job(job_name: str, task: batch_v1.TaskSpec, task_count: int) -> batch_v1.Job:
     resources = batch_v1.ComputeResource()
-    resources.cpu_milli = 30000
-    resources.memory_mib = 120000
+    resources.cpu_milli = 60000
+    resources.memory_mib = 240000
     task.compute_resource = resources
 
     task.max_retry_count = 0
@@ -96,7 +99,7 @@ def create_batch_job(job_name: str, task: batch_v1.TaskSpec, task_count: int) ->
     group.parallelism = task_count
 
     policy = batch_v1.AllocationPolicy.InstancePolicy()
-    policy.machine_type = "c2-standard-30"
+    policy.machine_type = "c2-standard-60"
 
     instances = batch_v1.AllocationPolicy.InstancePolicyOrTemplate()
     instances.policy = policy
@@ -180,10 +183,15 @@ def build_and_push_image(ctx):
 def train(ctx):
     ctx.invoke(build_and_push_image)
 
-    with open(os.path.join('models', ctx.obj['MODEL_ID'], 'params.json'), 'r') as f:
-        task_count = len(json.load(f))
+    if ctx.obj['RUN_ID'] is not None:
+        model_name = f"{ctx.obj['MODEL_ID']}-{ctx.obj['RUN_ID']}"
+        task_count = 1
+    else:
+        model_name = ctx.obj['MODEL_ID']
+        with open(os.path.join('models', ctx.obj['MODEL_ID'], 'params.json'), 'r') as f:
+            task_count = len(json.load(f))
 
-    job_name = f"numerai-{ctx.obj['MODEL_ID']}-train-{datetime.datetime.now().strftime('%Y-%m-%dt%H-%M-%S')}"
+    job_name = f"numerai-{model_name}-train-{datetime.datetime.now().strftime('%Y-%m-%dt%H-%M-%S')}"
     task = create_training_task(ctx)
     job = create_batch_job(job_name, task, task_count)
     print(job)
@@ -344,8 +352,8 @@ def create_workflow(ctx):
                                     NUMERAI_SECRET_KEY: ${numeraiSecretKey}
                                     NUMERAI_PUBLIC_ID: ${numeraiPublicId}
                             computeResource:
-                              cpuMilli: 30000
-                              memoryMib: 120000
+                              cpuMilli: 16000
+                              memoryMib: 64000
                             maxRunDuration:
                               seconds: 43200
                             volumes:
