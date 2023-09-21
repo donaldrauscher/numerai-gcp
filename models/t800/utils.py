@@ -77,6 +77,38 @@ def get_biggest_change_features(corrs, n):
     return worst_n
 
 
+def get_biggest_corr_change_negative_eras(data, features, prediction_col, n):
+    target_corr = (
+        data
+        .groupby(ERA_COL)
+        .apply(lambda d: numerai_corr(d[prediction_col], d[TARGET_COL]))
+    )
+
+    negative_eras = target_corr[target_corr < 0].index.tolist()
+    positive_eras = target_corr[target_corr >= 0].index.tolist()
+
+    feature_corrs = (
+        data
+        .groupby(ERA_COL)
+        .apply(lambda era: era[features].corrwith(era[TARGET_COL]))
+    )
+
+    negative_era_feature_corrs = (
+        feature_corrs
+        .loc[feature_corrs.index.isin(negative_eras), :]
+        .mean()
+    )
+
+    positive_era_feature_corrs = (
+        feature_corrs
+        .loc[feature_corrs.index.isin(positive_eras), :]
+        .mean()
+    )
+
+    corr_diffs = negative_era_feature_corrs - positive_era_feature_corrs
+    return corr_diffs.abs().sort_values(ascending=False).head(n).index.tolist()
+
+
 def get_time_series_cross_val_splits(data, cv=3, embargo=12):
     all_train_eras = data[ERA_COL].unique()
     len_split = len(all_train_eras) // cv

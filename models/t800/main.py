@@ -11,6 +11,7 @@ from utils import (
     neutralize,
     validation_metrics,
     get_biggest_change_features,
+    get_biggest_corr_change_negative_eras,
     ERA_COL,
     DATA_TYPE_COL,
     TARGET_COL,
@@ -105,7 +106,7 @@ def download_all(ctx):
 @cli.command()
 @click.pass_context
 def download_for_training(ctx):
-    if ctx.obj['RUN_ID'] != 0:
+    if int(os.environ.get('BATCH_TASK_INDEX', -1)) != 0:
         print("Skipping download because not first task")
         return
     for dataset in ctx.obj['DATASETS'].keys():
@@ -176,7 +177,8 @@ def load_model_config(ctx: click.Context):
 
 
 def train_model(ctx: click.Context, model_key: str, target_col: str, params: dict,
-                all_data: pd.DataFrame, training_index: pd.Index, validation_index: pd.Index = None) :
+                all_data: pd.DataFrame, training_index: pd.Index, validation_index: pd.Index = None,
+                validation_pred_col: str = 'pred') :
     model = load_model(ctx, model_key)
     if model:
         print(f"{model_key} model has already been trained")
@@ -199,7 +201,7 @@ def train_model(ctx: click.Context, model_key: str, target_col: str, params: dic
     if validation_index is not None:
         print(f"Adding predictions for {target_col} to validation data")
         model_expected_features = model.booster_.feature_name()
-        all_data.loc[validation_index, "pred"] = model.predict(
+        all_data.loc[validation_index, validation_pred_col] = model.predict(
             all_data.loc[validation_index, model_expected_features])
 
     del model
@@ -246,10 +248,14 @@ def train(ctx):
     gc.collect()
 
     # fill in NAs
-    print("Cleaning up NAs")
+    na_counts = all_data[features].isna().sum()
     na_impute = all_data[features].median(skipna=True).to_dict()
-    all_data[features] = all_data[features].fillna(na_impute)
-    all_data[features] = all_data[features].astype("int8")
+    if na_counts.sum() > 0:
+        print("Cleaning up NAs")
+        # na_impute are floats so the .fillna will cast to float which blows up memory
+        # recast to int8 afterwards but this will cause a memory spike
+        all_data[features] = all_data[features].fillna(na_impute)
+        all_data[features] = all_data[features].astype("int8")
 
     # train models
     train_model(
@@ -262,23 +268,21 @@ def train(ctx):
         validation_index=validation_index
     )
 
-    if not ctx.obj['TEST']:
-        train_model(
-            ctx,
-            model_key='all_data',
-            target_col=ctx.obj['PARAMS']['target_params']['target_col'],
-            params=ctx.obj['PARAMS']['model_params'],
-            all_data=all_data,
-            training_index=all_index
-        )
-
     # neutralize
     print("Neutralizing predictions on validation data")
 
+    neutralizers = []
     if ctx.obj['PARAMS']['neutralize_params']['strategy'] == 'top_k_riskiest_features':
         all_feature_corrs = all_data.loc[training_index, :].groupby(ERA_COL).apply(
             lambda era: era[features].corrwith(era[TARGET_COL]))
         neutralizers = get_biggest_change_features(all_feature_corrs, ctx.obj['PARAMS']['neutralize_params']['n_features'])
+    elif ctx.obj['PARAMS']['neutralize_params']['strategy'] == 'top_k_corr_change_negative_eras':
+        neutralizers = get_biggest_corr_change_negative_eras(
+            all_data.loc[validation_index, :],
+            features,
+            'pred',
+            ctx.obj['PARAMS']['neutralize_params']['n_features']
+        )
     elif ctx.obj['PARAMS']['neutralize_params']['strategy'] == 'all_features':
         neutralizers = features
 
@@ -297,13 +301,25 @@ def train(ctx):
     # calculate metrics
     print("Calculating metrics on validation data")
     validation_stats = validation_metrics(
-        all_data.loc[validation_index, :], ["pred", "pred_neutral"],
+        all_data.loc[validation_index, :], ["pred", "pred_neutral"] if len(neutralizers) > 0 else ["pred"],
         example_col=EXAMPLE_PREDS_COL, target_col=TARGET_COL, fast_mode=False,
         features_for_neutralization=fncv3_features
     )
-    print(validation_stats[["mean", "sharpe"]].to_markdown())
+    validation_stats['last_era'] = all_data[ERA_COL].max()
+    print(validation_stats[["mean", "sharpe", "max_drawdown", "feature_neutral_mean"]].to_markdown())
 
     gc.collect()
+
+    # train final model
+    if not ctx.obj['TEST']:
+        train_model(
+            ctx,
+            model_key='all_data',
+            target_col=ctx.obj['PARAMS']['target_params']['target_col'],
+            params=ctx.obj['PARAMS']['model_params'],
+            all_data=all_data,
+            training_index=all_index
+        )
 
     # final model config
     model_config = {
@@ -311,7 +327,7 @@ def train(ctx):
         "na_impute": na_impute,
     }
 
-    if ctx.obj['PARAMS']['neutralize_params']['strategy'] == 'top_k_riskiest_features':
+    if len(neutralizers) > 0:
         model_config['neutralizers'] = neutralizers
 
     # save params, metrics, and configuration
@@ -359,14 +375,18 @@ def inference(ctx, numerai_model_name):
 
     # neutralize
     print("Neutralizing predictions")
-    live_data["pred_neutral"] = neutralize(
-        df=live_data,
-        columns=["pred"],
-        neutralizers=model_config.get('neutralizers', features),
-        proportion=ctx.obj['PARAMS']['neutralize_params'].get('proportion', 1.0),
-        normalize=True,
-        era_col=ERA_COL
-    )
+    neutralizers = model_config.get('neutralizers', [])
+    if len(neutralizers) > 0:
+        live_data["pred_neutral"] = neutralize(
+            df=live_data,
+            columns=["pred"],
+            neutralizers=neutralizers,
+            proportion=ctx.obj['PARAMS']['neutralize_params'].get('proportion', 1.0),
+            normalize=True,
+            era_col=ERA_COL
+        )
+    else:
+        live_data["pred_neutral"] = live_data["pred"]
 
     # export
     print("Exporting predictions")

@@ -43,7 +43,7 @@ def create_training_task(ctx: click.Context) -> batch_v1.TaskSpec:
     def add_args(commands: List[str]):
         add_to_commands = []
         if ctx.obj['OVERWRITE']:
-            add_to_commands += ['--overwrite'] + commands
+            add_to_commands += ['--overwrite']
         if ctx.obj['RUN_ID'] is not None:
             add_to_commands += ["--run-id", ctx.obj['RUN_ID']]
         return add_to_commands + commands

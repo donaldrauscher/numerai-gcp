@@ -1,6 +1,6 @@
 {
   "dataset_params": {
-    "version": "v4",
+    "version": "v4.2",
     "feature_set": "small"
   },
   "target_params": {
