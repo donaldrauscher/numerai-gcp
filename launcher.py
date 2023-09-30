@@ -463,8 +463,8 @@ def round_performance(ctx):
         performance = (
             pd.DataFrame.from_records(napi.round_model_performances(model_name))
             .query('roundNumber >= 470')
-            .query('~corr.isnull()')
-            .filter(['corr', 'corrPercentile', 'corrWMetamodel', 'tc', 'tcPercentile', 'fncV3', 'fncV3Percentile'])
+            .filter(['corr20V2', 'corr20V2Percentile', 'corrWMetamodel', 'tc', 'tcPercentile', 'fncV3', 'fncV3Percentile'])
+            .assign(combined_percentile=lambda x: x.corr20V2Percentile + 3*x.tcPercentile)
             .mean()
             .to_frame()
             .transpose()
@@ -474,7 +474,7 @@ def round_performance(ctx):
 
     performances = (
         pd.concat(performances, axis=0)
-        .sort_values(by=['tc'], ascending=False)
+        .sort_values(by=['combined_percentile'], ascending=False)
     )
     print(performances)
 
