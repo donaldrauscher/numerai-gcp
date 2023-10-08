@@ -18,6 +18,18 @@ COMPUTE_SERVICE_ACCOUNT = "89590359009-compute@developer.gserviceaccount.com"
 NUMERAI_MODEL_PREFIX = "djr"
 WEBHOOK_FUNCTION_NAME = "numerai-webhook"
 
+MACHINES = {
+    "train": {
+        "machine_type": "c2-standard-60",
+        "cpu_milli": 60000,
+        "memory_mib": 240000
+    },
+    "inference": {
+        "machine_type": "c2-standard-16",
+        "cpu_milli": 16000,
+        "memory_mib": 64000
+    }
+}
 
 batch_client = batch_v1.BatchServiceClient()
 storage_client = storage.Client()
@@ -39,7 +51,7 @@ def create_container_runnable(model_id: str, commands: List[str]) -> batch_v1.Ru
     return runnable
 
 
-def create_training_task(ctx: click.Context) -> batch_v1.TaskSpec:
+def create_training_task(ctx: click.Context, command: str = "train") -> batch_v1.TaskSpec:
     def add_args(commands: List[str]):
         add_to_commands = []
         if ctx.obj['OVERWRITE']:
@@ -48,17 +60,19 @@ def create_training_task(ctx: click.Context) -> batch_v1.TaskSpec:
             add_to_commands += ["--run-id", ctx.obj['RUN_ID']]
         return add_to_commands + commands
 
-    # download-for-training will only run for BATCH_TASK_INDEX=0
-    runnable1 = create_container_runnable(ctx.obj['MODEL_ID'], add_args(["download-for-training"]))
+    # unsure why this isn't working...
+    # # download-for-training will only run for BATCH_TASK_INDEX=0
+    # runnable1 = create_container_runnable(ctx.obj['MODEL_ID'], add_args(["download-for-training"]))
 
-    # this ensures that BATCH_TASK_INDEX>1 waits for BATCH_TASK_INDEX=0 to complete download
-    runnable2 = batch_v1.Runnable()
-    runnable2.barrier = batch_v1.Runnable.Barrier()
+    # # this ensures that BATCH_TASK_INDEX>1 waits for BATCH_TASK_INDEX=0 to complete download
+    # runnable2 = batch_v1.Runnable()
+    # runnable2.barrier = batch_v1.Runnable.Barrier()
 
-    runnable3 = create_container_runnable(ctx.obj['MODEL_ID'], add_args(["train"]))
+    # runnable3 = create_container_runnable(ctx.obj['MODEL_ID'], add_args([command]))
 
     task = batch_v1.TaskSpec()
-    task.runnables = [runnable1, runnable2, runnable3]
+    task.runnables = [runnable3]
+    #task.runnables = [runnable1, runnable2, runnable3]
     return task
 
 
@@ -75,10 +89,10 @@ def create_inference_task(ctx: click.Context, run_id: str, numerai_model_name: s
     return task
 
 
-def create_batch_job(job_name: str, task: batch_v1.TaskSpec, task_count: int) -> batch_v1.Job:
+def create_batch_job(job_name: str, task: batch_v1.TaskSpec, task_count: int, machine: str) -> batch_v1.Job:
     resources = batch_v1.ComputeResource()
-    resources.cpu_milli = 60000
-    resources.memory_mib = 240000
+    resources.cpu_milli = MACHINES[machine]['cpu_milli']
+    resources.memory_mib = MACHINES[machine]['memory_mib']
     task.compute_resource = resources
 
     task.max_retry_count = 0
@@ -99,7 +113,7 @@ def create_batch_job(job_name: str, task: batch_v1.TaskSpec, task_count: int) ->
     group.parallelism = task_count
 
     policy = batch_v1.AllocationPolicy.InstancePolicy()
-    policy.machine_type = "c2-standard-60"
+    policy.machine_type = MACHINES[machine]["machine_type"]
 
     instances = batch_v1.AllocationPolicy.InstancePolicyOrTemplate()
     instances.policy = policy
@@ -192,8 +206,41 @@ def train(ctx):
             task_count = len(json.load(f))
 
     job_name = f"numerai-{model_name}-train-{datetime.datetime.now().strftime('%Y-%m-%dt%H-%M-%S')}"
-    task = create_training_task(ctx)
-    job = create_batch_job(job_name, task, task_count)
+    task = create_training_task(ctx, command="train")
+    job = create_batch_job(job_name, task, task_count, machine="train")
+    print(job)
+
+
+@cli.command()
+@click.pass_context
+def refresh_metrics(ctx):
+    ctx.invoke(build_and_push_image)
+
+    if ctx.obj['RUN_ID'] is not None:
+        model_name = f"{ctx.obj['MODEL_ID']}-{ctx.obj['RUN_ID']}"
+        task_count = 1
+    else:
+        model_name = ctx.obj['MODEL_ID']
+        with open(os.path.join('models', ctx.obj['MODEL_ID'], 'params.json'), 'r') as f:
+            task_count = len(json.load(f))
+
+    job_name = f"numerai-{model_name}-refresh-metrics-{datetime.datetime.now().strftime('%Y-%m-%dt%H-%M-%S')}"
+    task = create_training_task(ctx, command="refresh-metrics")
+    job = create_batch_job(job_name, task, task_count, machine="inference")
+    print(job)
+
+
+@cli.command()
+@click.pass_context
+def download_datasets(ctx):
+    ctx.invoke(build_and_push_image)
+
+    model_name = ctx.obj['MODEL_ID']
+    task_count = 1
+
+    job_name = f"numerai-{model_name}-download-datasets-{datetime.datetime.now().strftime('%Y-%m-%dt%H-%M-%S')}"
+    task = create_training_task(ctx, command="download-datasets-all")
+    job = create_batch_job(job_name, task, task_count, machine="inference")
     print(job)
 
 
@@ -210,7 +257,7 @@ def inference(ctx, upload):
         task = create_inference_task(ctx, run_id, ctx.obj['NUMERAI_MODEL_NAME'])
     else:
         task = create_inference_task(ctx, run_id, None)
-    job = create_batch_job(job_name, task, task_count=1)
+    job = create_batch_job(job_name, task, task_count=1, machine="inference")
     print(job)
 
 
@@ -231,7 +278,7 @@ def get_metrics(ctx):
 
     metrics = (
         pd.concat(metrics, axis=0)
-        .filter(['param_index', 'index', 'mean', 'std', 'sharpe', 'max_drawdown', 'corr_with_example_preds', 'feature_neutral_mean'])
+        .filter(['param_index', 'index', 'mean', 'std', 'sharpe', 'max_drawdown', 'corr_with_example_preds', 'feature_neutral_mean', 'last_era'])
     )
 
     print(metrics)
@@ -352,8 +399,8 @@ def create_workflow(ctx):
                                     NUMERAI_SECRET_KEY: ${numeraiSecretKey}
                                     NUMERAI_PUBLIC_ID: ${numeraiPublicId}
                             computeResource:
-                              cpuMilli: 16000
-                              memoryMib: 64000
+                              cpuMilli: {{ machine['cpu_milli'] }}
+                              memoryMib: {{ machine['memory_mib'] }}
                             maxRunDuration:
                               seconds: 43200
                             volumes:
@@ -366,7 +413,7 @@ def create_workflow(ctx):
                         allocationPolicy:
                           instances:
                             policy:
-                              machineType: "c2-standard-16"
+                              machineType: "{{ machine['machine_type'] }}"
                         logsPolicy:
                           destination: CLOUD_LOGGING
                     result: createAndRunBatchJobResponse
@@ -411,7 +458,8 @@ def create_workflow(ctx):
         secret_key=os.environ['NUMERAI_SECRET_KEY'],
         numerai_model_name=ctx.obj['NUMERAI_MODEL_NAME'],
         gcs_path=os.path.join(CLOUD_STORAGE_BUCKET, CLOUD_STORAGE_PATH) + '/',
-        region=REGION
+        region=REGION,
+        machine=MACHINES["train"]
     )
 
     workflow = workflows.Workflow()
