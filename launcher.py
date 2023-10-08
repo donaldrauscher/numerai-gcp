@@ -400,9 +400,9 @@ def create_workflow(ctx):
                     raise:
                       message: ${"The underlying batch job " + jobId + " failed"}
             retry:
-              max_retries: 1
+              max_retries: 3
               backoff:
-                initial_delay: 1800
+                initial_delay: 900
     """))
     workflow_contents = workflow_contents.render(
         model_id=ctx.obj['MODEL_ID'],
@@ -464,7 +464,7 @@ def round_performance(ctx):
             pd.DataFrame.from_records(napi.round_model_performances(model_name))
             .query('roundNumber >= 470')
             .filter(['corr20V2', 'corr20V2Percentile', 'corrWMetamodel', 'tc', 'tcPercentile', 'fncV3', 'fncV3Percentile'])
-            .assign(combined_percentile=lambda x: x.corr20V2Percentile + 3*x.tcPercentile)
+            .assign(combined_percentile=lambda x: 2*x.corr20V2Percentile + x.tcPercentile)
             .mean()
             .to_frame()
             .transpose()
