@@ -31,6 +31,7 @@ def cli(ctx, run_id, data_dir, test, overwrite):
     ctx.obj['RUN_ID'] = int(run_id)
     ctx.obj['TEST'] = test
     ctx.obj['OVERWRITE'] = overwrite
+    ctx.obj['DATA_DIR'] = data_dir
 
     if test:
         run_id = "test"
@@ -98,20 +99,34 @@ def download(ctx, dataset):
 
 @cli.command()
 @click.pass_context
-def download_all(ctx):
+def download_datasets(ctx):
     for dataset in ctx.obj['DATASETS'].keys():
         ctx.invoke(download, dataset=dataset)
 
 
 @cli.command()
 @click.pass_context
-def download_for_training(ctx):
+def download_datasets_all(ctx):
     if int(os.environ.get('BATCH_TASK_INDEX', -1)) != 0:
         print("Skipping download because not first task")
         return
+
+    with open('params.json', 'r') as f:
+        params = json.load(f)
+    
+    dataset_versions = set()
+    for p in params:
+        dataset_versions.add(p['dataset_params']['version'])
+
+    ctx.obj['DATASETS'] = {}
+    for dv in dataset_versions:
+        make_path = lambda x: os.path.join(ctx.obj['DATA_DIR'], 'datasets', dv, x)
+        ctx.obj['DATASETS'][f'train_{dv}'] = make_path('train_int8.parquet')
+        ctx.obj['DATASETS'][f'validation_{dv}'] = make_path('validation_int8.parquet')
+        ctx.obj['DATASETS'][f'validation_example_preds_{dv}'] = make_path('validation_example_preds.parquet')
+        ctx.obj['DATASETS'][f'features_{dv}'] = make_path('features.json')
+
     for dataset in ctx.obj['DATASETS'].keys():
-        if dataset == 'live':
-            continue
         ctx.invoke(download, dataset=dataset)
 
 
@@ -316,6 +331,82 @@ def train(ctx):
         f.write(validation_stats.to_json(orient='index', indent=4))
     with open(os.path.join(ctx.obj['MODEL_RUN_PATH'], 'config.json'), 'w') as f:
         json.dump(model_config, f, indent=4, separators=(',', ': '))
+
+
+@cli.command()
+@click.pass_context
+def refresh_metrics(ctx):
+    # load data
+    print("Loading data")
+    training_data, validation_data = load_training_data(ctx)
+    features = list(training_data.filter(like='feature_').columns)
+
+    # medium feature set for fncv3
+    with open(ctx.obj['DATASETS']['features'], "r") as f:
+        feature_metadata = json.load(f)
+
+    fncv3_features = feature_metadata["feature_sets"]['fncv3_features']
+    fncv3_features = list(set(fncv3_features).intersection(set(features)))
+
+    # reduce the number of eras to every 4th era to speed things up
+    if ctx.obj['TEST']:
+        every_4th_era = training_data[ERA_COL].unique()[::4]
+        training_data = training_data[training_data[ERA_COL].isin(every_4th_era)]
+        every_4th_era = validation_data[ERA_COL].unique()[::4]
+        validation_data = validation_data[validation_data[ERA_COL].isin(every_4th_era)]
+
+    # get all the data to possibly use for training
+    all_data = pd.concat([training_data, validation_data])
+
+    training_index = training_data.index
+    validation_index = validation_data.index
+    all_index = all_data.index
+
+    del training_data
+    del validation_data
+    gc.collect()
+
+    # fill in NAs
+    print("Cleaning up NAs")
+    na_counts = all_data[features].isna().sum()
+    na_impute = all_data[features].median(skipna=True).to_dict()
+    if na_counts.sum() > 0:
+        # na_impute are floats so the .fillna will cast to float which blows up memory
+        # recast to int8 afterwards but this will cause a memory spike
+        all_data[features] = all_data[features].fillna(na_impute)
+        all_data[features] = all_data[features].astype("int8")
+
+    # add OOS predictions for validation
+    # NOTE: ignore overwrite
+    print("Adding predictions to validation data")
+    ctx.obj["OVERWRITE"] = False
+    model = load_model(ctx, "train")
+    assert model
+
+    model_expected_features = model.booster_.feature_name()
+    all_data.loc[validation_index, "pred"] = model.predict(
+        all_data.loc[validation_index, model_expected_features])
+
+    del model
+    gc.collect()
+
+    # calculate metrics
+    print("Calculating metrics on validation data")
+    pred_cols = [EXAMPLE_PREDS_COL, "pred"]
+    validation_stats = validation_metrics(
+        all_data.loc[validation_index, :], 
+        pred_cols=pred_cols, example_col=EXAMPLE_PREDS_COL, target_col=TARGET_COL, fast_mode=False,
+        features_for_neutralization=fncv3_features
+    )
+    validation_stats['last_era'] = all_data[ERA_COL].max()
+    print(validation_stats[["mean", "sharpe", "max_drawdown", "feature_neutral_mean"]].to_markdown())
+
+    gc.collect()
+
+    # save params, metrics, and configuration
+    print("Saving metrics")
+    with open(os.path.join(ctx.obj['MODEL_RUN_PATH'], 'metrics.json'), 'w') as f:
+        f.write(validation_stats.to_json(orient='index', indent=4))
 
 
 @cli.command()

@@ -19,12 +19,17 @@ NUMERAI_MODEL_PREFIX = "djr"
 WEBHOOK_FUNCTION_NAME = "numerai-webhook"
 
 MACHINES = {
-    "train": {
+    "C60": {
         "machine_type": "c2-standard-60",
         "cpu_milli": 60000,
         "memory_mib": 240000
     },
-    "inference": {
+    "C30": {
+        "machine_type": "c2-standard-30",
+        "cpu_milli": 30000,
+        "memory_mib": 120000
+    },
+    "C16": {
         "machine_type": "c2-standard-16",
         "cpu_milli": 16000,
         "memory_mib": 64000
@@ -68,7 +73,7 @@ def create_training_task(ctx: click.Context, command: str = "train") -> batch_v1
     # runnable2 = batch_v1.Runnable()
     # runnable2.barrier = batch_v1.Runnable.Barrier()
 
-    # runnable3 = create_container_runnable(ctx.obj['MODEL_ID'], add_args([command]))
+    runnable3 = create_container_runnable(ctx.obj['MODEL_ID'], add_args([command]))
 
     task = batch_v1.TaskSpec()
     task.runnables = [runnable3]
@@ -207,7 +212,7 @@ def train(ctx):
 
     job_name = f"numerai-{model_name}-train-{datetime.datetime.now().strftime('%Y-%m-%dt%H-%M-%S')}"
     task = create_training_task(ctx, command="train")
-    job = create_batch_job(job_name, task, task_count, machine="train")
+    job = create_batch_job(job_name, task, task_count, machine="C60")
     print(job)
 
 
@@ -226,7 +231,7 @@ def refresh_metrics(ctx):
 
     job_name = f"numerai-{model_name}-refresh-metrics-{datetime.datetime.now().strftime('%Y-%m-%dt%H-%M-%S')}"
     task = create_training_task(ctx, command="refresh-metrics")
-    job = create_batch_job(job_name, task, task_count, machine="inference")
+    job = create_batch_job(job_name, task, task_count, machine="C30")
     print(job)
 
 
@@ -240,7 +245,7 @@ def download_datasets(ctx):
 
     job_name = f"numerai-{model_name}-download-datasets-{datetime.datetime.now().strftime('%Y-%m-%dt%H-%M-%S')}"
     task = create_training_task(ctx, command="download-datasets-all")
-    job = create_batch_job(job_name, task, task_count, machine="inference")
+    job = create_batch_job(job_name, task, task_count, machine="C16")
     print(job)
 
 
@@ -459,7 +464,7 @@ def create_workflow(ctx):
         numerai_model_name=ctx.obj['NUMERAI_MODEL_NAME'],
         gcs_path=os.path.join(CLOUD_STORAGE_BUCKET, CLOUD_STORAGE_PATH) + '/',
         region=REGION,
-        machine=MACHINES["train"]
+        machine=MACHINES["C16"]
     )
 
     workflow = workflows.Workflow()
