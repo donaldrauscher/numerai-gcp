@@ -513,11 +513,35 @@ def round_performance(ctx):
     for model_name, model_id in napi.get_models().items():
         if model_name.endswith('_test'):
             continue
+        
+        def get_scores(row):
+            ss = row['submissionScores']
+            del row['submissionScores']
+            perc = (
+                pd.DataFrame.from_records(ss)
+                .assign(displayName=lambda x: x.displayName + '_perc')
+                .set_index('displayName')
+                .percentile.to_dict()
+            )
+            val = (
+                pd.DataFrame.from_records(ss)
+                .set_index('displayName')
+                ['value'].to_dict()
+            )
+            return {
+                **row,
+                **val,
+                **perc
+            }
+
+
+        performance_raw = napi.round_model_performances_v2(model_id)
+
         performance = (
-            pd.DataFrame.from_records(napi.round_model_performances(model_name))
+            pd.DataFrame.from_records([get_scores(p) for p in performance_raw if p['submissionScores']])
             .query('roundNumber >= 470')
-            .filter(['corr20V2', 'corr20V2Percentile', 'corrWMetamodel', 'tc', 'tcPercentile', 'fncV3', 'fncV3Percentile'])
-            .assign(combined_percentile=lambda x: 2*x.corr20V2Percentile + x.tcPercentile)
+            .filter(['v2_corr20', 'v2_corr20_perc', 'bmc', 'bmc_perc', 'mmc', 'mmc_perc'])
+            .assign(combined_percentile=lambda x: x.v2_corr20_perc + 2*x.mmc_perc)
             .mean()
             .to_frame()
             .transpose()
