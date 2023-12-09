@@ -77,3 +77,8 @@ python launcher.py \
   --run-id [0] \
   create-workflow
 ```
+
+To filter to task logs, add the following filter:
+```
+logName="projects/blog-180218/logs/batch_task_logs"
+```
