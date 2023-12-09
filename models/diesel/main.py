@@ -228,10 +228,14 @@ def train(ctx):
     gc.collect()
 
     # fill in NAs
-    print("Cleaning up NAs")
+    na_counts = all_data[features].isna().sum()
     na_impute = all_data[features].median(skipna=True).to_dict()
-    all_data[features] = all_data[features].fillna(na_impute)
-    all_data[features] = all_data[features].astype("int8")
+    if na_counts.sum() > 0:
+        print("Cleaning up NAs")
+        # na_impute are floats so the .fillna will cast to float which blows up memory
+        # recast to int8 afterwards but this will cause a memory spike
+        all_data[features] = all_data[features].fillna(na_impute)
+        all_data[features] = all_data[features].astype("int8")
 
     # split into training groups
     eras = sorted(list(all_data.era.astype(int).unique()))
@@ -295,12 +299,12 @@ def train(ctx):
     print("Ensembling predictions from different targets")
 
     targets_pred = [f'{t}_pred' for t in targets]
-    target_train_index = all_data.loc[validation_index, ['target_nomi_v4_20']].dropna().index
+    target_train_index = all_data.loc[validation_index, [TARGET_COL]].dropna().index
 
     ensembler = Ridge(**ensemble_params)
     ensembler.fit(
         all_data.loc[target_train_index, targets_pred],
-        all_data.loc[target_train_index, ['target_nomi_v4_20']]
+        all_data.loc[target_train_index, [TARGET_COL]]
     )
 
     all_data.loc[validation_index, ['pred_ensemble']] = ensembler.predict(
@@ -329,11 +333,13 @@ def train(ctx):
     # calculate metrics
     print("Calculating metrics on validation data")
     validation_stats = validation_metrics(
-        all_data.loc[validation_index, :], ["pred_ensemble", "pred_ensemble_neutral"],
+        all_data.loc[validation_index, :], 
+        pred_cols=[EXAMPLE_PREDS_COL, "pred_ensemble", "pred_ensemble_neutral"],
         example_col=EXAMPLE_PREDS_COL, target_col=TARGET_COL, fast_mode=False,
         features_for_neutralization=features_for_neutralization
     )
-    print(validation_stats[["mean", "sharpe", "corr_with_example_preds"]].to_markdown())
+    validation_stats['last_era'] = all_data[ERA_COL].max()
+    print(validation_stats[["mean", "sharpe", "max_drawdown", "feature_neutral_mean"]].to_markdown())
 
     gc.collect()
 
