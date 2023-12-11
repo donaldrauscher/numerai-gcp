@@ -537,17 +537,18 @@ def round_performance(ctx):
 
         performance_raw = napi.round_model_performances_v2(model_id)
 
-        performance = (
-            pd.DataFrame.from_records([get_scores(p) for p in performance_raw if p['submissionScores']])
-            .query('roundNumber >= 470')
-            .filter(['v2_corr20', 'v2_corr20_perc', 'bmc', 'bmc_perc', 'mmc', 'mmc_perc'])
-            .assign(combined_percentile=lambda x: x.v2_corr20_perc + 2*x.mmc_perc)
-            .mean()
-            .to_frame()
-            .transpose()
-        )
-        performance.insert(0, 'model', model_name)
-        performances.append(performance)
+        if len(performance_raw) > 0:
+            performance = (
+                pd.DataFrame.from_records([get_scores(p) for p in performance_raw if p['submissionScores']])
+                .query('roundNumber >= 470')
+                .filter(['v2_corr20', 'v2_corr20_perc', 'bmc', 'bmc_perc', 'mmc', 'mmc_perc'])
+                .assign(combined_percentile=lambda x: 0.5*x.v2_corr20_perc + 2*x.mmc_perc)
+                .mean()
+                .to_frame()
+                .transpose()
+            )
+            performance.insert(0, 'model', model_name)
+            performances.append(performance)
 
     performances = (
         pd.concat(performances, axis=0)
