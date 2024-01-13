@@ -202,7 +202,6 @@ def load_training_data(ctx: click.Context) -> (pd.DataFrame, pd.Index, pd.Index)
 
     training_index = training_data.index
     validation_index = validation_data.index
-    all_index = all_data.index
 
     del training_data
     del validation_data
@@ -372,7 +371,7 @@ def train(ctx):
             target_col=ctx.obj['PARAMS']['target_params']['target_col'],
             params=ctx.obj['PARAMS']['model_params'],
             all_data=all_data,
-            training_index=all_index
+            training_index=all_data.index
         )
 
     # final model config
