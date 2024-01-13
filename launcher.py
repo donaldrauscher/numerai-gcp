@@ -283,7 +283,7 @@ def get_metrics(ctx):
 
     metrics = (
         pd.concat(metrics, axis=0)
-        .filter(['param_index', 'index', 'mean', 'std', 'sharpe', 'max_drawdown', 'corr_with_example_preds', 'feature_neutral_mean', 'last_era'])
+        .filter(['param_index', 'index', 'mean', 'std', 'sharpe', 'max_drawdown', 'corr_with_example_preds', 'feature_neutral_mean', 'mmc_mean', 'last_era'])
     )
 
     print(metrics)

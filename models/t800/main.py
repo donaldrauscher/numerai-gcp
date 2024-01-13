@@ -122,12 +122,14 @@ def download_datasets_all(ctx):
     for p in params:
         dataset_versions.add(p['dataset_params']['version'])
 
+    make_path = lambda x: os.path.join(ctx.obj['DATA_DIR'], 'datasets', dv, x)
+
     ctx.obj['DATASETS'] = {}
     for dv in dataset_versions:
-        make_path = lambda x: os.path.join(ctx.obj['DATA_DIR'], 'datasets', dv, x)
         ctx.obj['DATASETS'][f'train_{dv}'] = make_path('train_int8.parquet')
         ctx.obj['DATASETS'][f'validation_{dv}'] = make_path('validation_int8.parquet')
         ctx.obj['DATASETS'][f'validation_example_preds_{dv}'] = make_path('validation_example_preds.parquet')
+        ctx.obj['DATASETS'][f'meta_model_{dv}'] = make_path('meta_model.parquet')
         ctx.obj['DATASETS'][f'features_{dv}'] = make_path('features.json')
 
     for dataset in ctx.obj['DATASETS'].keys():
