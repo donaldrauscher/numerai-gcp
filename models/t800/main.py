@@ -1,4 +1,4 @@
-import os, gc, re, json
+import os, gc, re, json, glob
 from typing import List
 
 import click
@@ -44,12 +44,8 @@ def cli(ctx, run_id, data_dir, test, overwrite):
     ctx.obj['MODEL_RUN_PATH'] = os.path.join(data_dir, 'artifacts', MODEL_ID, str(run_id))
     os.makedirs(ctx.obj['MODEL_RUN_PATH'], exist_ok=True)
 
-    if test:
-        with open('params_test.json', 'r') as f:
-            ctx.obj['PARAMS'] = json.load(f)
-    else:
-        with open('params.json', 'r') as f:
-            ctx.obj['PARAMS'] = json.load(f)[int(run_id)]
+    with open(os.path.join('params', f'{run_id}.json'), 'r') as f:
+        ctx.obj['PARAMS'] = json.load(f)
 
     # create paths to input datasets
     dataset_version = ctx.obj['PARAMS']['dataset_params']['version']
@@ -115,9 +111,13 @@ def download_datasets_all(ctx):
         print("Skipping download because not first task")
         return
 
-    with open('params.json', 'r') as f:
-        params = json.load(f)
-    
+    params = []
+    for p in glob.glob('params/*.json'):
+        if os.path.basename(p) == 'test.json':
+            continue
+        with open(p, 'r') as f:
+            params.append(json.load(f))
+
     dataset_versions = set()
     for p in params:
         dataset_versions.add(p['dataset_params']['version'])

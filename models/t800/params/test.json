@@ -1,0 +1,21 @@
+{
+    "dataset_params": {
+      "version": "v4.3",
+      "feature_set": "small"
+    },
+    "target_params": {
+      "target_col": "target_cyrus_v4_20"
+    },
+    "model_params": {
+      "n_estimators": 200,
+      "learning_rate": 0.1,
+      "max_depth": 5,
+      "num_leaves": 32,
+      "colsample_bytree": 0.1
+    },
+    "neutralize_params": {
+      "strategy": "all_features",
+      "proportion": 0.25
+    }
+  }
+  
