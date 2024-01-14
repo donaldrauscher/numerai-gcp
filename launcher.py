@@ -259,10 +259,10 @@ def inference(ctx, upload):
         datetime.datetime.now().strftime('%Y-%m-%dt%H-%M-%S')
     )
     if upload:
-        task = create_inference_task(ctx, run_id, ctx.obj['NUMERAI_MODEL_NAME'])
+        task = create_inference_task(ctx, ctx.obj['RUN_ID'], ctx.obj['NUMERAI_MODEL_NAME'])
     else:
-        task = create_inference_task(ctx, run_id, None)
-    job = create_batch_job(job_name, task, task_count=1, machine="inference")
+        task = create_inference_task(ctx, ctx.obj['RUN_ID'], None)
+    job = create_batch_job(job_name, task, task_count=1, machine="C16")
     print(job)
 
 
