@@ -1,11 +1,10 @@
 {
   "dataset_params": {
-    "version": "v4.3",
-    "feature_set": "small"
+    "version": "v4.1"
   },
   "model_params": {
-    "n_estimators": 200,
-    "learning_rate": 0.1,
+    "n_estimators": 2000,
+    "learning_rate": 0.01,
     "max_depth": 5,
     "num_leaves": 32,
     "colsample_bytree": 0.1
@@ -13,12 +12,16 @@
   "ensemble_params": {
     "strategy": "equal_weight",
     "targets": [
-      "target_cyrus_v4_20",
-      "target_teager_v4_20"
+      "target_nomi_v4_20",
+      "target_jerome_v4_60",
+      "target_ralph_v4_20",
+      "target_tyler_v4_20",
+      "target_victor_v4_20",
+      "target_waldo_v4_20"
     ]
   },
   "neutralize_params": {
     "strategy": "all_features",
-    "proportion": 0.25
+    "proportion": 0.5
   }
 }

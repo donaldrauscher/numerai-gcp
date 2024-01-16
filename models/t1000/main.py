@@ -1,5 +1,5 @@
-import os, gc, re, json
-from typing import List
+import os, gc, re, json, glob
+from typing import List, Union
 
 import click
 import pandas as pd
@@ -24,6 +24,72 @@ from numerai_tools.scoring import neutralize
 MODEL_ID = 't1000'
 
 
+class ModelArtifact(object):
+    def __init__(self, 
+        ctx: click.Context,
+        data_subset: str,
+        model_artifact_params: Union[str, dict]
+    ):
+        self.external = isinstance(model_artifact_params, dict)
+
+        # model trained in this context
+        # model_artifact_params = TARGET
+        if not self.external:
+            self.target = model_artifact_params
+            self.model_dir = ctx.obj['MODEL_RUN_PATH']
+            self.overwrite = ctx.obj['OVERWRITE']
+            self.model_key = f"{data_subset}_{self.target}"
+        
+        # model trained externally
+        # model_artifact_params = dict specifying where model resides
+        else:
+            self.target = model_artifact_params['target']
+            self.model_dir = os.path.join(
+                ctx.obj['DATA_DIR'], 
+                'artifacts', 
+                model_artifact_params['model_id'],
+                str(model_artifact_params['run_id'])
+            )
+            self.overwrite = False  # do not obey overwrite for external models!
+            self.model_key = self._get_external_model_key(data_subset, model_artifact_params)
+
+            # check to make sure the models have the same datasets
+            dataset = ctx.obj['PARAMS']['dataset_params']
+            with open(os.path.join(self.model_dir, 'params.json'), 'r') as f:
+                dataset_check = json.load(f)['dataset_params']
+            assert dataset == dataset_check, f"External model {model_artifact_params['model_id']}.{model_artifact_params['run_id']}'s dataset needs to match this model's dataset"
+
+    def load(self):
+        model = False
+        if os.path.exists(self.model_path) and not self.overwrite:
+            model = pd.read_pickle(self.model_path)
+        return model
+
+    def save(self, model):
+        if self.external:
+            raise Exception("Cannot save models from this context")
+        pd.to_pickle(model, self.model_path)
+
+    @property
+    def model_path(self):
+        os.makedirs(os.path.join(self.model_dir, 'models'), exist_ok=True)
+        return os.path.join(
+            self.model_dir,
+            'models',
+            self.model_key + '.pkl'
+        )
+
+    @property
+    def pred_col(self):
+        return f'{self.target}_pred'
+
+    @staticmethod
+    def _get_external_model_key(data_subset: str, model_artifact_params: dict):
+        if model_artifact_params['model_id'] == "t800":
+            return data_subset
+        raise NotImplementedError(f"Need to update `_get_external_model_key` to pull from model_id=\"{model_artifact_params['model_id']}\"")
+
+
 @click.group()
 @click.option('--run-id', default=os.environ.get('BATCH_TASK_INDEX', 0))
 @click.option('--data-dir', default="data")
@@ -44,12 +110,8 @@ def cli(ctx, run_id, data_dir, test, overwrite):
     ctx.obj['MODEL_RUN_PATH'] = os.path.join(data_dir, 'artifacts', MODEL_ID, str(run_id))
     os.makedirs(ctx.obj['MODEL_RUN_PATH'], exist_ok=True)
 
-    if test:
-        with open('params_test.json', 'r') as f:
-            ctx.obj['PARAMS'] = json.load(f)
-    else:
-        with open('params.json', 'r') as f:
-            ctx.obj['PARAMS'] = json.load(f)[int(run_id)]
+    with open(os.path.join('params', f'{run_id}.json'), 'r') as f:
+        ctx.obj['PARAMS'] = json.load(f)
 
     # create paths to input datasets
     dataset_version = ctx.obj['PARAMS']['dataset_params']['version']
@@ -115,9 +177,13 @@ def download_datasets_all(ctx):
         print("Skipping download because not first task")
         return
 
-    with open('params.json', 'r') as f:
-        params = json.load(f)
-    
+    params = []
+    for p in glob.glob('params/*.json'):
+        if os.path.basename(p) == 'test.json':
+            continue
+        with open(p, 'r') as f:
+            params.append(json.load(f))
+
     dataset_versions = set()
     for p in params:
         dataset_versions.add(p['dataset_params']['version'])
@@ -225,15 +291,6 @@ def load_live_data(ctx: click.Context) -> pd.DataFrame:
     return pd.read_parquet(ctx.obj['DATASETS']['live'], columns=read_columns)
 
 
-def load_model(ctx: click.Context, model_key: str):
-    path = os.path.join(ctx.obj['MODEL_RUN_PATH'], 'models', f'{model_key}.pkl')
-    if os.path.exists(path) and not ctx.obj['OVERWRITE']:
-        model = pd.read_pickle(path)
-    else:
-        model = False
-    return model
-
-
 def load_model_config(ctx: click.Context):
     path = os.path.join(ctx.obj['MODEL_RUN_PATH'], 'config.json')
     if os.path.exists(path) and not ctx.obj['OVERWRITE']:
@@ -280,36 +337,59 @@ def calc_neutralized_pred(df: pd.DataFrame, pred_cols: List[str], neutralizers: 
     )
 
 
-def train_model(ctx: click.Context, model_key: str, target_col: str, params: dict,
-                all_data: pd.DataFrame, training_index: pd.Index, validation_index: pd.Index = None,
-                validation_pred_col: str = 'pred') :
-    model = load_model(ctx, model_key)
-    if model:
-        print(f"{model_key} model has already been trained")
-    else:
-        print(f"Training {model_key} model")
+def train_model(
+        ctx: click.Context, 
+        data_subset: str,
+        model_artifact_params: Union[str, dict],
+        all_data: pd.DataFrame, training_index: pd.Index, validation_index: pd.Index = None
+    ) -> ModelArtifact:
 
-        target_train_index = all_data.loc[training_index, target_col].dropna().index
+    model_artifact = ModelArtifact(ctx, data_subset, model_artifact_params)
+    model = model_artifact.load()
+
+    if model:
+        print(f"{model_artifact.target} model has already been trained")
+    
+    elif model_artifact.external:
+        raise Exception(f"External model for {model_artifact.target} cannot be trained in this context")
+
+    else:
+        print(f"Training {model_artifact.target} model")
+
+        target_train_index = all_data.loc[training_index, model_artifact.target].dropna().index
         features = list(all_data.filter(like='feature_').columns)
 
+        params = ctx.obj['PARAMS']['model_params']
         model = LGBMRegressor(**params)
         model.fit(
             all_data.loc[target_train_index, features],
-            all_data.loc[target_train_index, target_col]
+            all_data.loc[target_train_index, model_artifact.target]
         )
-
-        os.makedirs(os.path.join(ctx.obj['MODEL_RUN_PATH'], 'models'), exist_ok=True)
-        out = os.path.join(ctx.obj['MODEL_RUN_PATH'], 'models', f'{model_key}.pkl')
-        pd.to_pickle(model, out)
+        model_artifact.save(model)
 
     if validation_index is not None:
-        print(f"Adding predictions for {target_col} to validation data")
+        print(f"Adding predictions for {model_artifact.model_key} to validation data")
         model_expected_features = model.booster_.feature_name()
-        all_data.loc[validation_index, validation_pred_col] = model.predict(
+        all_data.loc[validation_index, model_artifact.pred_col] = model.predict(
             all_data.loc[validation_index, model_expected_features])
 
     del model
     gc.collect()
+
+    return model_artifact
+
+
+def ensemble_models(ctx: click.Context, all_data: pd.DataFrame, pred_cols: List[str]) -> pd.Series:
+    if ctx.obj['PARAMS']['ensemble_params']['strategy'] == "equal_weight":
+        return all_data[pred_cols].mean(axis=1)
+    elif ctx.obj['PARAMS']['ensemble_params']['strategy'] == "equal_weight_rank":
+        return (
+            all_data
+            .groupby(ERA_COL)[pred_cols].rank(pct=True)
+            .mean(axis=1)
+        )
+    else:
+        raise NotImplementedError(f"Need to implement ensembler {ctx.obj['PARAMS']['ensemble_params']['strategy']}")
 
 
 @cli.command()
@@ -327,24 +407,22 @@ def train(ctx):
     features = get_feature_columns(all_data)
 
     # train models
-    model_keys = {}
+    model_artifacts = []
     for t in ctx.obj['PARAMS']['ensemble_params']['targets']:
-        train_model(
+        model_artifact = train_model(
             ctx,
-            model_key=f'train_{t}',
-            target_col=t,
-            params=ctx.obj['PARAMS']['model_params'],
+            data_subset='train',
+            model_artifact_params=t,
             all_data=all_data,
             training_index=training_index,
-            validation_index=validation_index,
-            validation_pred_col=f'{t}_pred'
+            validation_index=validation_index
         )
-        model_keys[f'train_{t}'] = f'{t}_pred'
+        model_artifacts.append(model_artifact)
 
     # make an ensemble
     print("Ensembling predictions from different targets")
-    pred_cols = list(model_keys.values())
-    all_data['pred'] = all_data[pred_cols].mean(axis=1)
+    pred_cols = [a.pred_col for a in model_artifacts]
+    all_data['pred'] = ensemble_models(ctx, all_data, pred_cols)
 
     # neutralize
     neutralizers = get_neutralizers(ctx, all_data, training_index, validation_index)
@@ -374,22 +452,23 @@ def train(ctx):
 
     # train final model
     if not ctx.obj['TEST']:
-        model_keys = {}
+        model_artifacts.clear()
         for t in ctx.obj['PARAMS']['ensemble_params']['targets']:
-            train_model(
+            model_artifact = train_model(
                 ctx,
-                model_key=f'all_data_{t}',
-                target_col=t,
-                params=ctx.obj['PARAMS']['model_params'],
+                data_subset='all_data',
+                model_artifact_params=t,
                 all_data=all_data,
-                training_index=training_index,
-                validation_index=validation_index
+                training_index=all_data.index
             )
-            model_keys[f'all_data_{t}'] = f'{t}_pred'
+            model_artifacts.append(model_artifact)
 
     # final model config
     model_config = {
-        "model_keys": model_keys,
+        "model_paths": {
+            a.pred_col: a.model_path
+            for a in model_artifacts
+        },
         "na_impute": na_impute,
     }
 
@@ -422,20 +501,25 @@ def refresh_metrics(ctx):
 
     pred_cols = []
     for t in ctx.obj['PARAMS']['ensemble_params']['targets']:
-        model = load_model(ctx, f'train_{t}')
+        model_artifact = ModelArtifact(
+            ctx,
+            data_subset="train",
+            model_artifact_params=t
+        )
+        model = model_artifact.load()
         assert model
 
         model_expected_features = model.booster_.feature_name()
-        all_data.loc[validation_index, f"{t}_pred"] = model.predict(
+        all_data.loc[validation_index, model_artifact.pred_col] = model.predict(
             all_data.loc[validation_index, model_expected_features])
-        pred_cols.append(f"{t}_pred")
+        pred_cols.append(model_artifact.pred_col)
 
         del model
         gc.collect()
 
     # make an ensemble
     print("Ensembling predictions from different targets")
-    all_data['pred'] = all_data[pred_cols].mean(axis=1)
+    all_data['pred'] = ensemble_models(ctx, all_data, pred_cols)
 
     # neutralize
     neutralizers = get_neutralizers(ctx, all_data, training_index, validation_index)
@@ -495,10 +579,10 @@ def inference(ctx, numerai_model_name):
 
     # generate predictions
     print("Generating predictions")
-    model_keys = model_config['model_keys']
-    pred_cols = list(model_keys.values())
-    for model_key, pred_col in model_config['model_keys'].items():
-        model = load_model(ctx, model_key)
+    model_paths = model_config['model_paths']
+    pred_cols = list(model_paths.keys())
+    for pred_col, model_path in model_paths.items():
+        model = pd.read_pickle(model_path)
         model_expected_features = model.booster_.feature_name()
         assert set(model_expected_features) == set(features)
         live_data.loc[:, pred_col] = model.predict(
@@ -507,7 +591,7 @@ def inference(ctx, numerai_model_name):
 
     # make an ensemble
     print("Ensembling predictions from different targets")
-    live_data['pred'] = live_data[pred_cols].mean(axis=1)
+    live_data['pred'] = ensemble_models(ctx, live_data, pred_cols)
 
     # neutralize
     print("Neutralizing predictions")
