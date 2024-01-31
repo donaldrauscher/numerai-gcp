@@ -8,14 +8,16 @@ from numerapi import NumerAPI
 from lightgbm import LGBMRegressor
 
 from utils import (
-    neutralize,
     validation_metrics,
-    get_biggest_change_features,
     ERA_COL,
     DATA_TYPE_COL,
     TARGET_COL,
-    EXAMPLE_PREDS_COL
+    EXAMPLE_PREDS_COL,
+    META_MODEL_COL
 )
+
+from numerai_tools.scoring import neutralize
+
 
 MODEL_ID = 'missile'
 
@@ -40,12 +42,8 @@ def cli(ctx, run_id, data_dir, test, overwrite):
     ctx.obj['MODEL_RUN_PATH'] = os.path.join(data_dir, 'artifacts', MODEL_ID, str(run_id))
     os.makedirs(ctx.obj['MODEL_RUN_PATH'], exist_ok=True)
 
-    if test:
-        with open('params_test.json', 'r') as f:
-            ctx.obj['PARAMS'] = json.load(f)
-    else:
-        with open('params.json', 'r') as f:
-            ctx.obj['PARAMS'] = json.load(f)[int(run_id)]
+    with open(os.path.join('params', f'{run_id}.json'), 'r') as f:
+        ctx.obj['PARAMS'] = json.load(f)
 
     # create paths to input datasets
     dataset_version = ctx.obj['PARAMS']['dataset_params']['version']
@@ -124,6 +122,7 @@ def download_datasets_all(ctx):
         ctx.obj['DATASETS'][f'train_{dv}'] = make_path('train_int8.parquet')
         ctx.obj['DATASETS'][f'validation_{dv}'] = make_path('validation_int8.parquet')
         ctx.obj['DATASETS'][f'validation_example_preds_{dv}'] = make_path('validation_example_preds.parquet')
+        ctx.obj['DATASETS'][f'meta_model_{dv}'] = make_path('meta_model.parquet')
         ctx.obj['DATASETS'][f'features_{dv}'] = make_path('features.json')
 
     for dataset in ctx.obj['DATASETS'].keys():
@@ -153,7 +152,21 @@ def get_read_columns(ctx: click.Context) -> List[str]:
     return read_columns
 
 
-def load_training_data(ctx: click.Context) -> (pd.DataFrame, pd.DataFrame):
+def get_feature_columns(df: pd.DataFrame) -> List[str]:
+    return list(df.filter(like='feature_').columns)
+
+
+def get_fnc_features(ctx: click.Context, features: List[str]) -> List[str]:
+    # medium feature set for fncv3
+    with open(ctx.obj['DATASETS']['features'], "r") as f:
+        feature_metadata = json.load(f)
+
+    fncv3_features = feature_metadata["feature_sets"]['fncv3_features']
+    fncv3_features = list(set(fncv3_features).intersection(set(features)))
+    return fncv3_features
+
+
+def load_training_data(ctx: click.Context) -> (pd.DataFrame, pd.Index, pd.Index):
     read_columns = get_read_columns(ctx)
 
     # note: sometimes when trying to read the downloaded data you get an error about invalid magic parquet bytes...
@@ -164,7 +177,40 @@ def load_training_data(ctx: click.Context) -> (pd.DataFrame, pd.DataFrame):
     validation_preds = pd.read_parquet(ctx.obj['DATASETS']['validation_example_preds'])
     validation_data[EXAMPLE_PREDS_COL] = validation_preds["prediction"]
 
-    return (training_data, validation_data)
+    meta_model = pd.read_parquet(ctx.obj['DATASETS']['meta_model'])
+    validation_data[META_MODEL_COL] = meta_model["numerai_meta_model"]
+
+    # list of features
+    features = get_feature_columns(training_data)
+
+    # reduce the number of eras to every 4th era to speed things up
+    if ctx.obj['TEST']:
+        every_4th_era = training_data[ERA_COL].unique()[::4]
+        training_data = training_data[training_data[ERA_COL].isin(every_4th_era)]
+        every_4th_era = validation_data[ERA_COL].unique()[::4]
+        validation_data = validation_data[validation_data[ERA_COL].isin(every_4th_era)]
+
+    # get all the data to possibly use for training
+    all_data = pd.concat([training_data, validation_data])
+
+    training_index = training_data.index
+    validation_index = validation_data.index
+
+    del training_data
+    del validation_data
+    gc.collect()
+
+    # fill in NAs
+    na_counts = all_data[features].isna().sum()
+    na_impute = all_data[features].median(skipna=True).to_dict()
+    if na_counts.sum() > 0:
+        print("Cleaning up NAs")
+        # na_impute are floats so the .fillna will cast to float which blows up memory
+        # recast to int8 afterwards but this will cause a memory spike
+        all_data[features] = all_data[features].fillna(na_impute)
+        all_data[features] = all_data[features].astype("int8")
+
+    return (all_data, training_index, validation_index, na_impute)
 
 
 def load_live_data(ctx: click.Context) -> pd.DataFrame:
@@ -189,6 +235,23 @@ def load_model_config(ctx: click.Context):
     else:
         model_config = False
     return model_config
+
+
+def neutralize_target(df: pd.DataFrame, neutralizers: List[str], proportion: float, target_col: str) -> pd.Series:
+    return (
+        df
+        .groupby(ERA_COL, group_keys=True)
+        .apply(
+            lambda d: neutralize(
+                d[[target_col]],
+                d[neutralizers],
+                proportion=proportion
+            )
+        )
+        .reset_index()
+        .set_index("id")
+        [target_col]
+    )
 
 
 def train_model(ctx: click.Context, model_key: str, target_col: str, params: dict,
@@ -233,53 +296,16 @@ def train(ctx):
 
     # load data
     print("Loading data")
-    training_data, validation_data = load_training_data(ctx)
-    features = list(training_data.filter(like='feature_').columns)
-
-    # medium feature set for fncv3
-    with open(ctx.obj['DATASETS']['features'], "r") as f:
-        feature_metadata = json.load(f)
-
-    fncv3_features = feature_metadata["feature_sets"]['fncv3_features']
-    fncv3_features = list(set(fncv3_features).intersection(set(features)))
-
-    # reduce the number of eras to every 4th era to speed things up
-    if ctx.obj['TEST']:
-        every_4th_era = training_data[ERA_COL].unique()[::4]
-        training_data = training_data[training_data[ERA_COL].isin(every_4th_era)]
-        every_4th_era = validation_data[ERA_COL].unique()[::4]
-        validation_data = validation_data[validation_data[ERA_COL].isin(every_4th_era)]
-
-    # get all the data to possibly use for training
-    all_data = pd.concat([training_data, validation_data])
-
-    training_index = training_data.index
-    validation_index = validation_data.index
-    all_index = all_data.index
-
-    del training_data
-    del validation_data
-    gc.collect()
-
-    # fill in NAs
-    print("Cleaning up NAs")
-    na_counts = all_data[features].isna().sum()
-    na_impute = all_data[features].median(skipna=True).to_dict()
-    if na_counts.sum() > 0:
-        # na_impute are floats so the .fillna will cast to float which blows up memory
-        # recast to int8 afterwards but this will cause a memory spike
-        all_data[features] = all_data[features].fillna(na_impute)
-        all_data[features] = all_data[features].astype("int8")
+    all_data, training_index, validation_index, na_impute = load_training_data(ctx)
+    features = get_feature_columns(all_data)
+    fnc_features = get_fnc_features(ctx, features)
 
     # neutralize target
-    all_data["target_neutral"] = neutralize(
+    all_data["target_neutral"] = neutralize_target(
         df=all_data,
-        columns=[ctx.obj['PARAMS']['target_params']['target_col']],
-        neutralizers=fncv3_features,
+        neutralizers=fnc_features,
         proportion=1.0,
-        normalize=True,
-        era_col=ERA_COL,
-        verbose=True,
+        target_col=ctx.obj['PARAMS']['target_params']['target_col']
     )
     gc.collect()
 
@@ -296,13 +322,14 @@ def train(ctx):
 
     # calculate metrics
     print("Calculating metrics on validation data")
+    pred_cols = [EXAMPLE_PREDS_COL, "pred"]
     validation_stats = validation_metrics(
-        all_data.loc[validation_index, :], ["pred"],
-        example_col=EXAMPLE_PREDS_COL, target_col=TARGET_COL, fast_mode=False,
-        features_for_neutralization=fncv3_features
+        all_data.loc[validation_index, :], 
+        pred_cols=pred_cols, example_col=EXAMPLE_PREDS_COL, target_col=TARGET_COL,
+        features_for_neutralization=fnc_features
     )
     validation_stats['last_era'] = all_data[ERA_COL].max()
-    print(validation_stats[["mean", "sharpe", "max_drawdown", "feature_neutral_mean"]].to_markdown())
+    print(validation_stats[["mean", "sharpe", "max_drawdown", "feature_neutral_mean", "mmc_mean"]].to_markdown())
 
     gc.collect()
 
@@ -314,7 +341,7 @@ def train(ctx):
             target_col='target_neutral',
             params=ctx.obj['PARAMS']['model_params'],
             all_data=all_data,
-            training_index=all_index
+            training_index=all_data.index
         )
 
     # final model config
@@ -338,43 +365,9 @@ def train(ctx):
 def refresh_metrics(ctx):
     # load data
     print("Loading data")
-    training_data, validation_data = load_training_data(ctx)
-    features = list(training_data.filter(like='feature_').columns)
-
-    # medium feature set for fncv3
-    with open(ctx.obj['DATASETS']['features'], "r") as f:
-        feature_metadata = json.load(f)
-
-    fncv3_features = feature_metadata["feature_sets"]['fncv3_features']
-    fncv3_features = list(set(fncv3_features).intersection(set(features)))
-
-    # reduce the number of eras to every 4th era to speed things up
-    if ctx.obj['TEST']:
-        every_4th_era = training_data[ERA_COL].unique()[::4]
-        training_data = training_data[training_data[ERA_COL].isin(every_4th_era)]
-        every_4th_era = validation_data[ERA_COL].unique()[::4]
-        validation_data = validation_data[validation_data[ERA_COL].isin(every_4th_era)]
-
-    # get all the data to possibly use for training
-    all_data = pd.concat([training_data, validation_data])
-
-    training_index = training_data.index
-    validation_index = validation_data.index
-    all_index = all_data.index
-
-    del training_data
-    del validation_data
-    gc.collect()
-
-    # fill in NAs
-    print("Cleaning up NAs")
-    na_counts = all_data[features].isna().sum()
-    na_impute = all_data[features].median(skipna=True).to_dict()
-    if na_counts.sum() > 0:
-        # na_impute are floats so the .fillna will cast to float which blows up memory
-        # recast to int8 afterwards but this will cause a memory spike
-        all_data[features] = all_data[features].fillna(na_impute)
-        all_data[features] = all_data[features].astype("int8")
+    all_data, training_index, validation_index, na_impute = load_training_data(ctx)
+    features = get_feature_columns(all_data)
+    fnc_features = get_fnc_features(ctx, features)
 
     # add OOS predictions for validation
     # NOTE: ignore overwrite
@@ -394,12 +387,12 @@ def refresh_metrics(ctx):
     print("Calculating metrics on validation data")
     pred_cols = [EXAMPLE_PREDS_COL, "pred"]
     validation_stats = validation_metrics(
-        all_data.loc[validation_index, :], 
-        pred_cols=pred_cols, example_col=EXAMPLE_PREDS_COL, target_col=TARGET_COL, fast_mode=False,
-        features_for_neutralization=fncv3_features
+        all_data.loc[validation_index, :],
+        pred_cols=pred_cols, example_col=EXAMPLE_PREDS_COL, target_col=TARGET_COL,
+        features_for_neutralization=fnc_features
     )
     validation_stats['last_era'] = all_data[ERA_COL].max()
-    print(validation_stats[["mean", "sharpe", "max_drawdown", "feature_neutral_mean"]].to_markdown())
+    print(validation_stats[["mean", "sharpe", "max_drawdown", "feature_neutral_mean", "mmc_mean"]].to_markdown())
 
     gc.collect()
 
