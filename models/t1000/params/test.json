@@ -5,7 +5,8 @@
   },
   "model_params": {},
   "ensemble_params": {
-    "strategy": "equal_weight",
+    "strategy": "custom_weight",
+    "weights": [0.6, 0.4],
     "targets": [
       {
           "target": "target_cyrus_v4_20",

@@ -3,6 +3,7 @@ from typing import List, Union
 
 import click
 import pandas as pd
+import numpy as np
 import pyarrow.parquet as pq
 from numerapi import NumerAPI
 from lightgbm import LGBMRegressor
@@ -388,6 +389,14 @@ def ensemble_models(ctx: click.Context, all_data: pd.DataFrame, pred_cols: List[
             .groupby(ERA_COL)[pred_cols].rank(pct=True)
             .mean(axis=1)
         )
+    elif ctx.obj['PARAMS']['ensemble_params']['strategy'] == "custom_weight":
+        weights = np.array(ctx.obj['PARAMS']['ensemble_params']['weights'])
+        return (all_data[pred_cols] * weights).sum(axis=1)
+    elif ctx.obj['PARAMS']['ensemble_params']['strategy'] == "custom_weight_rank":
+        weights = np.array(ctx.obj['PARAMS']['ensemble_params']['weights'])
+        return (
+            all_data.groupby(ERA_COL)[pred_cols].rank(pct=True) * weights
+        ).sum(axis=1)
     else:
         raise NotImplementedError(f"Need to implement ensembler {ctx.obj['PARAMS']['ensemble_params']['strategy']}")
 
