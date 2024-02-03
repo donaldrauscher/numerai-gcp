@@ -8,15 +8,16 @@ from numerapi import NumerAPI
 from lightgbm import LGBMRegressor
 
 from utils import (
-    neutralize,
     validation_metrics,
-    get_biggest_change_features,
-    get_biggest_corr_change_negative_eras,
     ERA_COL,
     DATA_TYPE_COL,
     TARGET_COL,
-    EXAMPLE_PREDS_COL
+    EXAMPLE_PREDS_COL,
+    META_MODEL_COL
 )
+
+from numerai_tools.scoring import neutralize
+
 
 MODEL_ID = 'walker'
 
@@ -40,12 +41,8 @@ def cli(ctx, run_id, data_dir, test, overwrite):
     ctx.obj['MODEL_RUN_PATH'] = os.path.join(data_dir, 'artifacts', MODEL_ID, str(run_id))
     os.makedirs(ctx.obj['MODEL_RUN_PATH'], exist_ok=True)
 
-    if test:
-        with open('params_test.json', 'r') as f:
-            ctx.obj['PARAMS'] = json.load(f)
-    else:
-        with open('params.json', 'r') as f:
-            ctx.obj['PARAMS'] = json.load(f)[int(run_id)]
+    with open(os.path.join('params', f'{run_id}.json'), 'r') as f:
+        ctx.obj['PARAMS'] = json.load(f)
 
     # create paths to input datasets
     dataset_version = ctx.obj['PARAMS']['dataset_params']['version']
@@ -62,7 +59,8 @@ def cli(ctx, run_id, data_dir, test, overwrite):
         'train': make_path('train_int8.parquet'),
         'validation': make_path('validation_int8.parquet'),
         'validation_example_preds': make_path('validation_example_preds.parquet'),
-        'features': make_path('features.json')
+        'features': make_path('features.json'),
+        'meta_model': make_path('meta_model.parquet')
     }
 
     # this is where we'll save our submissions
@@ -138,7 +136,21 @@ def get_read_columns(ctx: click.Context) -> List[str]:
     return read_columns
 
 
-def load_training_data(ctx: click.Context) -> (pd.DataFrame, pd.DataFrame):
+def get_feature_columns(df: pd.DataFrame) -> List[str]:
+    return list(df.filter(like='feature_').columns)
+
+
+def get_fnc_features(ctx: click.Context, features: List[str]) -> List[str]:
+    # medium feature set for fncv3
+    with open(ctx.obj['DATASETS']['features'], "r") as f:
+        feature_metadata = json.load(f)
+
+    fncv3_features = feature_metadata["feature_sets"]['fncv3_features']
+    fncv3_features = list(set(fncv3_features).intersection(set(features)))
+    return fncv3_features
+
+
+def load_training_data(ctx: click.Context) -> (pd.DataFrame, pd.Index, pd.Index):
     read_columns = get_read_columns(ctx)
 
     # note: sometimes when trying to read the downloaded data you get an error about invalid magic parquet bytes...
@@ -149,86 +161,11 @@ def load_training_data(ctx: click.Context) -> (pd.DataFrame, pd.DataFrame):
     validation_preds = pd.read_parquet(ctx.obj['DATASETS']['validation_example_preds'])
     validation_data[EXAMPLE_PREDS_COL] = validation_preds["prediction"]
 
-    return (training_data, validation_data)
+    meta_model = pd.read_parquet(ctx.obj['DATASETS']['meta_model'])
+    validation_data[META_MODEL_COL] = meta_model["numerai_meta_model"]
 
-
-def load_live_data(ctx: click.Context) -> pd.DataFrame:
-    read_columns = get_read_columns(ctx)
-    return pd.read_parquet(ctx.obj['DATASETS']['live'], columns=read_columns)
-
-
-def load_model(ctx: click.Context, model_key: str):
-    path = os.path.join(ctx.obj['MODEL_RUN_PATH'], 'models', f'{model_key}.pkl')
-    if os.path.exists(path) and not ctx.obj['OVERWRITE']:
-        model = pd.read_pickle(path)
-    else:
-        model = False
-    return model
-
-
-def load_model_config(ctx: click.Context):
-    path = os.path.join(ctx.obj['MODEL_RUN_PATH'], 'config.json')
-    if os.path.exists(path) and not ctx.obj['OVERWRITE']:
-        with open(path, 'r') as f:
-            model_config = json.load(f)
-    else:
-        model_config = False
-    return model_config
-
-
-def train_model(ctx: click.Context, model_key: str, target_col: str, params: dict,
-                all_data: pd.DataFrame, training_index: pd.Index, validation_index: pd.Index = None,
-                validation_pred_col: str = 'pred', init_model: LGBMRegressor = None) -> LGBMRegressor:
-    model = load_model(ctx, model_key)
-    if model:
-        print(f"  {model_key} model has already been trained")
-    else:
-        print(f"  Training {model_key} model")
-
-        target_train_index = all_data.loc[training_index, target_col].dropna().index
-        features = list(all_data.filter(like='feature_').columns)
-
-        model = LGBMRegressor(**params)
-        model.fit(
-            all_data.loc[target_train_index, features],
-            all_data.loc[target_train_index, target_col],
-            init_model=init_model
-        )
-
-        os.makedirs(os.path.join(ctx.obj['MODEL_RUN_PATH'], 'models'), exist_ok=True)
-        out = os.path.join(ctx.obj['MODEL_RUN_PATH'], 'models', f'{model_key}.pkl')
-        pd.to_pickle(model, out)
-
-    if validation_index is not None and len(validation_index) > 0:
-        print(f"    Adding predictions for {target_col} to validation data")
-        model_expected_features = model.booster_.feature_name()
-        all_data.loc[validation_index, validation_pred_col] = model.predict(
-            all_data.loc[validation_index, model_expected_features])
-
-    gc.collect()
-    return model
-
-
-@cli.command()
-@click.pass_context
-def train(ctx):
-    # try loading model config to see if we've already trained
-    model_config = load_model_config(ctx)
-    if model_config:
-        print("Model has already been trained")
-        return
-
-    # load data
-    print("Loading data")
-    training_data, validation_data = load_training_data(ctx)
-    features = list(training_data.filter(like='feature_').columns)
-
-    # medium feature set for fncv3
-    with open(ctx.obj['DATASETS']['features'], "r") as f:
-        feature_metadata = json.load(f)
-
-    fncv3_features = feature_metadata["feature_sets"]['fncv3_features']
-    fncv3_features = list(set(fncv3_features).intersection(set(features)))
+    # list of features
+    features = get_feature_columns(training_data)
 
     # reduce the number of eras to every 4th era to speed things up
     if ctx.obj['TEST']:
@@ -242,7 +179,6 @@ def train(ctx):
 
     training_index = training_data.index
     validation_index = validation_data.index
-    all_index = all_data.index
 
     del training_data
     del validation_data
@@ -273,15 +209,104 @@ def train(ctx):
 
     validation_blocks = train_blocks[1:] + [[]]
 
+    return (all_data, training_index, validation_index, na_impute, train_blocks, validation_blocks)
+
+
+def load_live_data(ctx: click.Context) -> pd.DataFrame:
+    read_columns = get_read_columns(ctx)
+    return pd.read_parquet(ctx.obj['DATASETS']['live'], columns=read_columns)
+
+
+def load_model(ctx: click.Context, model_key: str):
+    path = os.path.join(ctx.obj['MODEL_RUN_PATH'], 'models', f'{model_key}.pkl')
+    if os.path.exists(path) and not ctx.obj['OVERWRITE']:
+        model = pd.read_pickle(path)
+    else:
+        model = False
+    return model
+
+
+def load_model_config(ctx: click.Context):
+    path = os.path.join(ctx.obj['MODEL_RUN_PATH'], 'config.json')
+    if os.path.exists(path) and not ctx.obj['OVERWRITE']:
+        with open(path, 'r') as f:
+            model_config = json.load(f)
+    else:
+        model_config = False
+    return model_config
+
+
+def neutralize_target(df: pd.DataFrame, neutralizers: List[str], proportion: float, target_col: str) -> pd.Series:
+    return (
+        df
+        .groupby(ERA_COL, group_keys=True)
+        .apply(
+            lambda d: neutralize(
+                d[[target_col]],
+                d[neutralizers],
+                proportion=proportion
+            )
+        )
+        .reset_index()
+        .set_index("id")
+        [target_col]
+    )
+
+
+def train_model(ctx: click.Context, model_key: str, target_col: str, params: dict,
+                all_data: pd.DataFrame, training_index: pd.Index, validation_index: pd.Index = None,
+                init_model: LGBMRegressor = None) -> LGBMRegressor:
+    model = load_model(ctx, model_key)
+    if model:
+        print(f"  {model_key} model has already been trained")
+    else:
+        print(f"  Training {model_key} model")
+
+        target_train_index = all_data.loc[training_index, target_col].dropna().index
+        features = list(all_data.filter(like='feature_').columns)
+
+        model = LGBMRegressor(**params)
+        model.fit(
+            all_data.loc[target_train_index, features],
+            all_data.loc[target_train_index, target_col],
+            init_model=init_model
+        )
+
+        os.makedirs(os.path.join(ctx.obj['MODEL_RUN_PATH'], 'models'), exist_ok=True)
+        out = os.path.join(ctx.obj['MODEL_RUN_PATH'], 'models', f'{model_key}.pkl')
+        pd.to_pickle(model, out)
+
+    if validation_index is not None and len(validation_index) > 0:
+        print(f"    Adding predictions for {target_col} to validation data")
+        model_expected_features = model.booster_.feature_name()
+        all_data.loc[validation_index, "pred"] = model.predict(
+            all_data.loc[validation_index, model_expected_features])
+
+    gc.collect()
+    return model
+
+
+@cli.command()
+@click.pass_context
+def train(ctx):
+    # try loading model config to see if we've already trained
+    model_config = load_model_config(ctx)
+    if model_config:
+        print("Model has already been trained")
+        return
+
+    # load data
+    print("Loading data")
+    all_data, training_index, validation_index, na_impute, train_blocks, validation_blocks = load_training_data(ctx)
+    features = get_feature_columns(all_data)
+    fnc_features = get_fnc_features(ctx, features)
+
     # neutralize target
-    all_data["target_neutral"] = neutralize(
+    all_data["target_neutral"] = neutralize_target(
         df=all_data,
-        columns=[ctx.obj['PARAMS']['target_params']['target_col']],
-        neutralizers=fncv3_features,
+        neutralizers=fnc_features,
         proportion=1.0,
-        normalize=True,
-        era_col=ERA_COL,
-        verbose=True,
+        target_col=ctx.obj['PARAMS']['target_params']['target_col']
     )
     gc.collect()
 
@@ -312,13 +337,14 @@ def train(ctx):
 
     # calculate metrics
     print("Calculating metrics on validation data")
+    pred_cols = [EXAMPLE_PREDS_COL, "pred"]
     validation_stats = validation_metrics(
-        all_data.loc[validation_index, :], ["pred"],
-        example_col=EXAMPLE_PREDS_COL, target_col=TARGET_COL, fast_mode=False,
-        features_for_neutralization=fncv3_features
+        all_data.loc[validation_index, :], 
+        pred_cols=pred_cols, example_col=EXAMPLE_PREDS_COL, target_col=TARGET_COL,
+        features_for_neutralization=fnc_features
     )
     validation_stats['last_era'] = all_data[ERA_COL].max()
-    print(validation_stats[["mean", "sharpe", "max_drawdown", "feature_neutral_mean"]].to_markdown())
+    print(validation_stats[["mean", "sharpe", "max_drawdown", "feature_neutral_mean", "mmc_mean"]].to_markdown())
 
     gc.collect()
 
@@ -336,6 +362,61 @@ def train(ctx):
         f.write(validation_stats.to_json(orient='index', indent=4))
     with open(os.path.join(ctx.obj['MODEL_RUN_PATH'], 'config.json'), 'w') as f:
         json.dump(model_config, f, indent=4, separators=(',', ': '))
+
+
+@cli.command()
+@click.pass_context
+def refresh_metrics(ctx):
+    # load data
+    print("Loading data")
+    all_data, training_index, validation_index, na_impute, train_blocks, validation_blocks = load_training_data(ctx)
+    features = get_feature_columns(all_data)
+    fnc_features = get_fnc_features(ctx, features)
+
+    # add OOS predictions for validation
+    # NOTE: ignore overwrite
+    print("Adding predictions to validation data")
+    ctx.obj["OVERWRITE"] = False
+    model = None
+    for i, (train_eras, validation_eras) in enumerate(zip(train_blocks, validation_blocks)):
+        if len(validation_eras) == 0:
+            continue
+
+        print(f"Training block #{i}")
+        print(f"  Training eras: {train_eras}")
+        print(f"  Validation eras: {validation_eras}")
+
+        training_index_i = all_data.loc[all_data.era.astype(int).isin(train_eras), ['era']].index
+        validation_index_i = all_data.loc[all_data.era.astype(int).isin(validation_eras), ['era']].index
+
+        # use previous if it doesn't exist
+        model = load_model(ctx, f"thru_{max(train_eras)}") or model
+        assert model
+
+        model_expected_features = model.booster_.feature_name()
+        all_data.loc[validation_index_i, "pred"] = model.predict(
+            all_data.loc[validation_index_i, model_expected_features])
+
+    del model
+    gc.collect()
+
+    # calculate metrics
+    print("Calculating metrics on validation data")
+    pred_cols = [EXAMPLE_PREDS_COL, "pred"]
+    validation_stats = validation_metrics(
+        all_data.loc[validation_index, :],
+        pred_cols=pred_cols, example_col=EXAMPLE_PREDS_COL, target_col=TARGET_COL,
+        features_for_neutralization=fnc_features
+    )
+    validation_stats['last_era'] = all_data[ERA_COL].max()
+    print(validation_stats[["mean", "sharpe", "max_drawdown", "feature_neutral_mean", "mmc_mean"]].to_markdown())
+
+    gc.collect()
+
+    # save params, metrics, and configuration
+    print("Saving metrics")
+    with open(os.path.join(ctx.obj['MODEL_RUN_PATH'], 'metrics.json'), 'w') as f:
+        f.write(validation_stats.to_json(orient='index', indent=4))
 
 
 @cli.command()
@@ -371,24 +452,9 @@ def inference(ctx, numerai_model_name):
         live_data.loc[:, model_expected_features])
     gc.collect()
 
-    # neutralize
-    print("Neutralizing predictions")
-    neutralizers = model_config.get('neutralizers', [])
-    if len(neutralizers) > 0:
-        live_data["pred_neutral"] = neutralize(
-            df=live_data,
-            columns=["pred"],
-            neutralizers=neutralizers,
-            proportion=ctx.obj['PARAMS']['neutralize_params'].get('proportion', 1.0),
-            normalize=True,
-            era_col=ERA_COL
-        )
-    else:
-        live_data["pred_neutral"] = live_data["pred"]
-
     # export
     print("Exporting predictions")
-    live_data["prediction"] = live_data['pred_neutral'].rank(pct=True)
+    live_data["prediction"] = live_data['pred'].rank(pct=True)
     live_data["prediction"].to_csv(ctx.obj['SUBMISSION_PATH'])
 
     # upload predictions
