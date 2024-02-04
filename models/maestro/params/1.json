@@ -1,0 +1,14 @@
+{
+  "dataset_params": {
+    "version": "v4.3"
+  },
+  "target_params": {
+    "target_col": "target_cyrus_v4_20"
+  },
+  "model_params": {
+    "neutralize_by_example_preds": "by_era",
+    "min_portfolio_weight": 0.05,
+    "max_portfolio_weight": 1.0,
+    "optimization_target_return": 0.01
+  }
+}
