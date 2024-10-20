@@ -6,7 +6,7 @@ from numerai_tools.scoring import correlation_contribution, numerai_corr, featur
 
 
 ERA_COL = "era"
-TARGET_COL = "target_cyrus_v4_20"
+TARGET_COL = "target_cyrusd_20"
 DATA_TYPE_COL = "data_type"
 EXAMPLE_PREDS_COL = "example_preds"
 META_MODEL_COL = "meta_model"

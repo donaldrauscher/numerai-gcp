@@ -1,0 +1,24 @@
+{
+  "dataset_params": {
+    "version": "v5.0"
+  },
+  "model_params": {},
+  "ensemble_params": {
+    "strategy": "equal_weight",
+    "targets": [
+      {
+          "target": "target_cyrusd_20",
+          "model_id": "t800",
+          "run_id": 9
+      },
+      {
+          "target": "target_teager2b_20",
+          "model_id": "t800",
+          "run_id": 10
+      }
+    ]
+  },
+  "neutralize_params": {
+    "strategy": "none"
+  }
+}

@@ -124,12 +124,15 @@ def cli(ctx, run_id, data_dir, test, overwrite):
     except ValueError:
         # in case current round not open for submissions
         current_round = 'na'
+
     make_path = lambda x: os.path.join(data_dir, 'datasets', dataset_version, x)
+    suffix = '_int8' if int(re.compile('^v([0-9]+)').search(dataset_version).group(1)) < 5 else ''
+
     ctx.obj['DATASETS'] = {
-        'train': make_path('train_int8.parquet'),
-        'validation': make_path('validation_int8.parquet'),
+        'train': make_path(f'train{suffix}.parquet'),
+        'validation': make_path(f'validation{suffix}.parquet'),
         'validation_example_preds': make_path('validation_example_preds.parquet'),
-        'meta_model': make_path('meta_model.parquet'),
+        #'meta_model': make_path('meta_model.parquet'),
         'features': make_path('features.json')
     }
 
@@ -137,7 +140,7 @@ def cli(ctx, run_id, data_dir, test, overwrite):
     submission_dir = os.path.join(data_dir, 'submissions', MODEL_ID, str(run_id))
     os.makedirs(os.path.join(submission_dir, dataset_version), exist_ok=True)
     ctx.obj['SUBMISSION_PATH'] = os.path.join(submission_dir, f"live_predictions_{current_round}.csv")
-    ctx.obj['DATASETS']['live'] = os.path.join(submission_dir, dataset_version, f'live_int8_{current_round}.parquet')
+    ctx.obj['DATASETS']['live'] = os.path.join(submission_dir, dataset_version, f'live{suffix}_{current_round}.parquet')
 
 
 @cli.command()
@@ -155,13 +158,16 @@ def download(ctx, dataset):
     if os.path.exists(out) and not ctx.obj['OVERWRITE']:
         print(f"{api_dataset} already exists!")
     else:
-        print(f'Downloading {api_dataset}...')
         try:
-            os.remove(out)
-        except FileNotFoundError:
-            pass
-        napi = NumerAPI()
-        napi.download_dataset(api_dataset, out)
+            print(f'Downloading {api_dataset}...')
+            try:
+                os.remove(out)
+            except FileNotFoundError:
+                pass
+            napi = NumerAPI()
+            napi.download_dataset(api_dataset, out)
+        except ValueError:
+            print(f"{api_dataset} doesn't exist!")
 
 
 @cli.command()
@@ -189,14 +195,17 @@ def download_datasets_all(ctx):
     for p in params:
         dataset_versions.add(p['dataset_params']['version'])
 
-    make_path = lambda x: os.path.join(ctx.obj['DATA_DIR'], 'datasets', dv, x)
-
     ctx.obj['DATASETS'] = {}
     for dv in dataset_versions:
-        ctx.obj['DATASETS'][f'train_{dv}'] = make_path('train_int8.parquet')
-        ctx.obj['DATASETS'][f'validation_{dv}'] = make_path('validation_int8.parquet')
+        os.makedirs(os.path.join(ctx.obj['DATA_DIR'], 'datasets', dv), exist_ok=True)
+
+        make_path = lambda x: os.path.join(ctx.obj['DATA_DIR'], 'datasets', dv, x)
+        suffix = '_int8' if int(re.compile('^v([0-9]+)').search(dv).group(1)) < 5 else ''
+
+        ctx.obj['DATASETS'][f'train_{dv}'] = make_path(f'train{suffix}.parquet')
+        ctx.obj['DATASETS'][f'validation_{dv}'] = make_path('fvalidation{suffix}.parquet')
         ctx.obj['DATASETS'][f'validation_example_preds_{dv}'] = make_path('validation_example_preds.parquet')
-        ctx.obj['DATASETS'][f'meta_model_{dv}'] = make_path('meta_model.parquet')
+        #ctx.obj['DATASETS'][f'meta_model_{dv}'] = make_path('meta_model.parquet')
         ctx.obj['DATASETS'][f'features_{dv}'] = make_path('features.json')
 
     for dataset in ctx.obj['DATASETS'].keys():
@@ -211,7 +220,7 @@ def get_read_columns(ctx: click.Context) -> List[str]:
         features = feature_metadata["feature_sets"][feature_set]
         print(f"Using feature set: {feature_set}")
     except KeyError:
-        features = list(feature_metadata["feature_stats"].keys())
+        features = feature_metadata["feature_sets"]["all"]
 
     print(f"Number of features: {len(features)}")
 
@@ -251,8 +260,8 @@ def load_training_data(ctx: click.Context) -> (pd.DataFrame, pd.Index, pd.Index)
     validation_preds = pd.read_parquet(ctx.obj['DATASETS']['validation_example_preds'])
     validation_data[EXAMPLE_PREDS_COL] = validation_preds["prediction"]
 
-    meta_model = pd.read_parquet(ctx.obj['DATASETS']['meta_model'])
-    validation_data[META_MODEL_COL] = meta_model["numerai_meta_model"]
+    # meta_model = pd.read_parquet(ctx.obj['DATASETS']['meta_model'])
+    # validation_data[META_MODEL_COL] = meta_model["numerai_meta_model"]
 
     # list of features
     features = get_feature_columns(training_data)

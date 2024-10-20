@@ -1,0 +1,19 @@
+{
+  "dataset_params": {
+    "version": "v5.0"
+  },
+  "target_params": {
+    "target_col": "target_cyrusd_20"
+  },
+  "model_params": {
+    "n_estimators": 30000,
+    "learning_rate": 0.001,
+    "max_depth": 10,
+    "num_leaves": 1024,
+    "colsample_bytree": 0.1,
+    "min_data_in_leaf": 10000
+  },
+  "neutralize_params": {
+    "strategy": "none"
+  }
+}
